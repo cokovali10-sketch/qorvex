@@ -1,6 +1,6 @@
 # Build artifacts
-qorvex.exe
-qorvex
+/qorvex
+/qorvex.exe
 *.exe
 
 # Go
