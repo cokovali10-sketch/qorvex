@@ -1,0 +1,41 @@
+# Build artifacts
+qorvex.exe
+qorvex
+*.exe
+
+# Go
+*.test
+*.out
+
+# Rust
+rust/target/
+
+# Python
+python/__pycache__/
+python/*.egg-info/
+python/.venv/
+python/venv/
+
+# TypeScript
+ts/node_modules/
+ts/dist/
+ts/.vite/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.log
+
+# Temporary
+%TEMP%/
+logs/
