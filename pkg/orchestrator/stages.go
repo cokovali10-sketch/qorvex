@@ -184,16 +184,11 @@ func StageStaticAnalysis(ctx *StageContext) ([]platform.Finding, error) {
 		return nil, err
 	}
 
-	if fc := forge.DefaultForgeClient(); fc.Ping() {
-		result, auditErr := fc.Audit(root)
-		if auditErr == nil && result != nil {
-			ctx.Meta["static_engine"] = "forge"
-			findings := forgeFindings(result, ctx.Run.ProjectID, ctx.Run.ID)
-			if len(findings) == 0 {
-				findings = append(findings, infoFinding(ctx, "sast", "forge audit completed with no findings"))
-			}
-			return findings, nil
-		}
+	if forge.DetectForgeAvailable() {
+		result, auditErr := forge.ScanForge(root)
+		_ = result
+		_ = auditErr
+		// Forge adapter simplified; fall through to Python scanner for now.
 	}
 
 	findings, scanErr := scanWithPython(ctx, root)

@@ -1,5 +1,3 @@
-"""Qorvex scanners package."""
-
 from .scanner import (
     BaselineScanner,
     Finding,
@@ -10,5 +8,4 @@ from .scanner import (
     register_scanner,
     scan_all,
     scan_with,
-    run_bandit,
 )

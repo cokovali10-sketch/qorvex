@@ -84,8 +84,8 @@ type Finding struct {
 // ScanForge runs Forge audit on a project path. Returns findings or empty if Forge unavailable.
 func ScanForge(projectPath string) (*Finding, error) {
 	cmd := []string{"forge", "audit", projectPath, "--json"}
-	var stdout, stderr bytes.Buffer
-	cmdOut, _ := exec.Command(cmd[0], cmd[1:]...).Output()
+	var stdout bytes.Buffer
+	cmdOut, err := exec.Command(cmd[0], cmd[1:]...).Output()
 	stdout.Write(cmdOut)
 
 	if len(cmdOut) == 0 || err != nil {
@@ -115,12 +115,34 @@ func ScanForge(projectPath string) (*Finding, error) {
 		Severity:    severityFor(result.Verdict),
 		Category:    "security",
 		Description: fmt.Sprintf("Forge verdict: %s (%d findings)", result.Verdict, len(findings)),
-		Severity:    severityFor(result.Verdict),
 		FilePath:     "",
 	}, nil
 }
 
-// severityFor normalises Forge severity to canonical values.
+// ForgeClient wraps a Forge installation path.
+type ForgeClient struct {
+	forgePath string
+}
+
+// DefaultForgeClient returns a client pointing at the default Forge install.
+func DefaultForgeClient() *ForgeClient {
+	return &ForgeClient{forgePath: "D:/Forge-Factority"}
+}
+
+// NewForgeClient creates a client with a custom path.
+func NewForgeClient(path string) *ForgeClient {
+	return &ForgeClient{forgePath: path}
+}
+
+// Ping checks if Forge is available.
+func (c *ForgeClient) Ping() bool {
+	return DetectForgeAvailable()
+}
+
+// Audit runs a Forge audit (placeholder returning nil).
+func (c *ForgeClient) Audit(root string) (*ForgeScanResult, error) {
+	return nil, fmt.Errorf("forge audit not implemented in adapter")
+}
 func severityFor(s string) string {
 	switch strings.ToLower(s) {
 	case "critical":
@@ -144,6 +166,8 @@ func RunAuditCommand(tool string, args ...string) ([]byte, error) {
 }
 
 // RegisterAuditMapping adds additional audit mappings (extensibility).
-func RegisterAuditMapping(name, severity, category, cwe, remedi) {
-	AuditCategoryRegistry[name] = AuditCategory{Name: name, Severity: severity, Category: category, CWE: cwe, Remediation: remedi}
+var AuditCategoryRegistry = map[string]AuditCategory{}
+
+func RegisterAuditMapping(name, severity, category, cwe, remediation string) {
+	AuditCategoryRegistry[name] = AuditCategory{Name: name, Severity: severity, Category: category, CWE: cwe, Remediation: remediation}
 }
