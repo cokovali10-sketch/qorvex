@@ -1,18 +1,29 @@
 services:
+  # Qorvex API service
   qorvex:
-    build: .
+    build:
+      context: .
+      target: qorvex-prod
     ports:
       - "8420:8420"
     environment:
       - QORVEX_PORT=8420
-      - QORVEX_SECRET=qorvex-secret-dev-key-change-in-production
-    volumes:
-      - .:/qorvex:ro
-    working_dir: /qorvex
+      - QORVEX_SECRET=qorvex-secret-change-in-production
+      - QORVEX_DSN=postgres://qorvex:qorvex-secret@db:5432/qorvex?sslmode=disable
+      - QORVEX_ENV=production
     depends_on:
-      - postgres
+      - db
+    restart: unless-stopped
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8420/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
-  postgres:
+  # PostgreSQL database
+  db:
     image: postgres:15-alpine
     environment:
       - POSTGRES_USER=qorvex
@@ -22,6 +33,24 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    restart: unless-stopped
+    # Health check
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qorvex -d qorvex"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:
