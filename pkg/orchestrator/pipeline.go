@@ -1,19 +1,23 @@
 package orchestrator
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
 	"qorvex/pkg/audit"
+	"qorvex/pkg/notify"
 	"qorvex/pkg/platform"
+	"qorvex/pkg/sbom"
 	"qorvex/pkg/store"
 )
 
 // Pipeline defines the verification sequence with stages.
 type Pipeline struct {
-	name   string
-	stages []StageDef
+	name     string
+	stages   []StageDef
+	notifier notify.Notifier
 }
 
 // StageDef defines a pipeline stage.
@@ -40,6 +44,11 @@ func NewPipeline() *Pipeline {
 			{Name: "report_generation", StageFunc: StageReportGeneration, TimeoutSec: 30, Critical: true},
 		},
 	}
+}
+
+// SetNotifier attaches a notification destination to the pipeline.
+func (p *Pipeline) SetNotifier(n notify.Notifier) {
+	p.notifier = n
 }
 
 // RunAsync executes the pipeline asynchronously and returns immediately.
@@ -185,6 +194,51 @@ func (p *Pipeline) RunAsync(run *platform.CheckRun, s *store.Store, auditors ...
 			ResourceID: run.ID,
 			Detail:     fmt.Sprintf("status=%s score=%.1f risk=%s findings=%d", run.Status, run.Result.Score, run.Result.RiskLevel, len(allFindings)),
 		})
+
+		// SBOM artifact from findings (stored as an sbom finding).
+		components := make([]sbom.Component, 0, len(allFindings))
+		for _, f := range allFindings {
+			components = append(components, sbom.Component{
+				Type:     "library",
+				Name:     f.Category + ": " + f.Description,
+				Version:  "",
+				PURL:     "",
+				Licenses: []sbom.License{{Name: f.Severity}},
+			})
+		}
+		if bom, err := sbom.NewGenerator(run.ProjectID, run.Result.Summary).Generate(components); err == nil {
+			if xml, err := bom.MarshalXML(); err == nil {
+				_ = s.CreateFinding(&platform.Finding{
+					ProjectID:   run.ProjectID,
+					CheckRunID:  run.ID,
+					Severity:    "info",
+					Category:    "sbom",
+					Description: string(xml),
+					RuleID:      "sbom-artifact",
+				})
+			}
+		}
+
+		// Notify about the completed check.
+		if p.notifier != nil {
+			sev := run.Result.RiskLevel
+			if sev == "" {
+				sev = "info"
+			}
+			_ = p.notifier.Notify(context.Background(), notify.Event{
+				Type:      "check." + run.Status,
+				Severity:  sev,
+				Title:     "Qorvex check " + run.Status,
+				Message:   run.Result.Summary,
+				ProjectID: run.ProjectID,
+				CheckID:   run.ID,
+				Meta: map[string]string{
+					"score":    fmt.Sprintf("%.1f", run.Result.Score),
+					"risk":     run.Result.RiskLevel,
+					"findings": fmt.Sprintf("%d", len(allFindings)),
+				},
+			})
+		}
 	}()
 }
 
@@ -229,6 +283,7 @@ func calculateScore(findings []platform.Finding) float64 {
 type Orchestrator struct {
 	store    *store.Store
 	auditor  *audit.Logger
+	notifier notify.Notifier
 	pipeline *Pipeline
 	mu       sync.Mutex
 	running  map[string]bool
@@ -245,6 +300,12 @@ func NewOrchestrator(s *store.Store) *Orchestrator {
 // SetAuditor attaches the signed audit log used by the API.
 func (o *Orchestrator) SetAuditor(al *audit.Logger) {
 	o.auditor = al
+}
+
+// SetNotifier attaches a notification destination (webhook, email, slack, ...).
+func (o *Orchestrator) SetNotifier(n notify.Notifier) {
+	o.notifier = n
+	o.pipeline.SetNotifier(n)
 }
 
 func (o *Orchestrator) StartCheck(projectID string) (*platform.CheckRun, error) {
