@@ -276,6 +276,185 @@ class BaselineScanner:
                 frameworks["Angular"] = frameworks.get("Angular", 0) + 1
 
 
+class DependencyScanner:
+    """Scans dependency manifest files for known vulnerable / unmaintained packages."""
+
+    name = "dependency"
+
+    MANIFESTS = {
+        "requirements.txt": "python",
+        "package.json": "node",
+        "go.mod": "go",
+        "Cargo.toml": "rust",
+        "pom.xml": "java",
+        "build.gradle": "java",
+    }
+
+    # Minimal heuristic: packages that look suspicious or unpinned.
+    SUSPICIOUS = {
+        "pickle", "pyyaml", "requests", "urllib3", "django", "flask",
+        "lodash", "moment", "react", "express",
+    }
+
+    def scan(self, project_path: str) -> ScanResult:
+        import time
+        start = time.time()
+        findings: List[Finding] = []
+        errors: List[str] = []
+        total_files = 0
+
+        if not os.path.isdir(project_path):
+            return ScanResult(self.name, [], ["path not found"], 0)
+
+        for root, dirs, files in os.walk(project_path):
+            dirs[:] = [d for d in dirs if d not in {".git", "node_modules", ".venv", "venv", "target", "dist", "build"} and not d.startswith(".")]
+            for fname in files:
+                if fname not in self.MANIFESTS:
+                    continue
+                fpath = os.path.join(root, fname)
+                total_files += 1
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                except OSError as exc:
+                    errors.append(f"cannot read {fpath}: {exc}")
+                    continue
+
+                lang = self.MANIFESTS[fname]
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith("//") or line.startswith("<!--"):
+                        continue
+                    pkg = self._extract_package(line, lang)
+                    if not pkg:
+                        continue
+                    if pkg.lower() in self.SUSPICIOUS:
+                        findings.append(Finding(
+                            severity="medium",
+                            category="dependency",
+                            description=f"Potentially risky dependency: {pkg}",
+                            file_path=fpath,
+                            rule_id="dep-risky-pkg",
+                        ))
+                    if self._is_unpinned(line):
+                        findings.append(Finding(
+                            severity="low",
+                            category="dependency",
+                            description=f"Unpinned dependency: {pkg}",
+                            file_path=fpath,
+                            rule_id="dep-unpinned",
+                        ))
+
+        elapsed = int((time.time() - start) * 1000)
+        return ScanResult(self.name, findings, errors, elapsed, total_files)
+
+    @staticmethod
+    def _extract_package(line: str, lang: str) -> Optional[str]:
+        if lang == "python":
+            m = re.match(r"([A-Za-z0-9_\-\.]+)", line)
+            return m.group(1) if m else None
+        if lang == "node":
+            m = re.match(r'"([^"]+)"\s*:', line)
+            return m.group(1) if m else None
+        if lang == "go":
+            m = re.match(r"([a-z0-9./\-_]+)\s+v?[0-9]", line)
+            return m.group(1) if m else None
+        if lang == "rust":
+            m = re.match(r'([a-z0-9_\-]+)\s*=\s*"', line)
+            return m.group(1) if m else None
+        if lang == "java":
+            m = re.match(r'<artifactId>([^<]+)</artifactId>', line)
+            return m.group(1) if m else None
+        return None
+
+    @staticmethod
+    def _is_unpinned(line: str) -> bool:
+        return not any(ch in line for ch in {"=", ">", "<", "~", "^"})
+
+
+class LicenseScanner:
+    """Detects license files and common license headers in source files."""
+
+    name = "license"
+
+    LICENSE_FILES = {"LICENSE", "LICENCE", "LICENSE.txt", "LICENCE.txt", "LICENSE.md", "COPYING"}
+
+    HEADER_PATTERNS = [
+        (re.compile(r"MIT License", re.I), "MIT"),
+        (re.compile(r"Apache License", re.I), "Apache-2.0"),
+        (re.compile(r"GNU General Public License", re.I), "GPL"),
+        (re.compile(r"BSD", re.I), "BSD"),
+        (re.compile(r"ISC License", re.I), "ISC"),
+    ]
+
+    def scan(self, project_path: str) -> ScanResult:
+        import time
+        start = time.time()
+        findings: List[Finding] = []
+        errors: List[str] = []
+        total_files = 0
+
+        if not os.path.isdir(project_path):
+            return ScanResult(self.name, [], ["path not found"], 0)
+
+        # Check for top-level license file.
+        for lf in self.LICENSE_FILES:
+            fpath = os.path.join(project_path, lf)
+            if os.path.isfile(fpath):
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                        head = f.read(2048)
+                    detected = self._detect(head)
+                    findings.append(Finding(
+                        severity="info",
+                        category="license",
+                        description=f"License file detected: {lf} ({detected})",
+                        file_path=fpath,
+                        rule_id="license-file",
+                    ))
+                    total_files += 1
+                except OSError as exc:
+                    errors.append(f"cannot read {fpath}: {exc}")
+                break
+
+        # Scan source files for SPDX / license headers.
+        skip_dirs = {".git", "node_modules", ".venv", "venv", "target", "dist", "build",
+                     "__pycache__", ".mypy_cache", ".pytest_cache", "vendor"}
+        for root, dirs, files in os.walk(project_path):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+            for fname in files:
+                if not fname.endswith((".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp", ".h")):
+                    continue
+                fpath = os.path.join(root, fname)
+                total_files += 1
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                        head = "".join(f.readlines()[:15])
+                except OSError as exc:
+                    errors.append(f"cannot read {fpath}: {exc}")
+                    continue
+                detected = self._detect(head)
+                if detected:
+                    findings.append(Finding(
+                        severity="info",
+                        category="license",
+                        description=f"License header in {fname}: {detected}",
+                        file_path=fpath,
+                        rule_id="license-header",
+                    ))
+                    break  # one header finding per project is enough
+
+        elapsed = int((time.time() - start) * 1000)
+        return ScanResult(self.name, findings, errors, elapsed, total_files)
+
+    @staticmethod
+    def _detect(text: str) -> str:
+        for pattern, lic in LicenseScanner.HEADER_PATTERNS:
+            if pattern.search(text):
+                return lic
+        return "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Scanner registry (used by CLI and package init)
 # ---------------------------------------------------------------------------
@@ -349,3 +528,7 @@ def run_bandit(project_path: str, timeout: int = 120) -> List[Finding]:
         return findings
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return []
+
+register_scanner('dependency', DependencyScanner)
+register_scanner('license', LicenseScanner)
+

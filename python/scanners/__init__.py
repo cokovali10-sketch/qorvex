@@ -1,6 +1,8 @@
 from .scanner import (
     BaselineScanner,
+    DependencyScanner,
     Finding,
+    LicenseScanner,
     ScanResult,
     Scanner,
     SemgrepScanner,

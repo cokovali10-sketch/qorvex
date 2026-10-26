@@ -11,6 +11,8 @@ export function Layout() {
           <Link to="/projects">Projects</Link>
           <Link to="/policies">Policies</Link>
           <Link to="/audit">Audit</Link>
+          <Link to="/settings">Settings</Link>
+          <Link to="/metrics">Metrics</Link>
         </div>
       </nav>
       <main className="main">
