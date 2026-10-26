@@ -112,7 +112,7 @@ export function login(credentials: LoginCredentials): Promise<LoginResponse> {
                     loading: false,
                     error: err.detail || res.statusText,
                 };
-                throw new Error(authState.error);
+                throw new Error(authState.error || "request failed");
             }
             const data = (await res.json()) as LoginResponse;
             return data;
