@@ -267,7 +267,7 @@ export function CheckPage() {
   const navigate = useNavigate();
   const [check, setCheck] = useState<CheckRun | null>(null);
   const [error, setError] = useState("");
-  const [isRiskFailed, setIsRiskFailed] = useState(false);
+  const [riskFailed, setRiskFailed] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -278,7 +278,7 @@ export function CheckPage() {
         // Update risk failed state based on fail-closed policy
         if (c.result) {
           const risk = c.result.risk_level;
-          setIsRiskFailed(isRiskFailed(risk));
+          setRiskFailed(isRiskFailed(risk));
         }
         if (c.status === "completed" || c.status === "failed") clearInterval(poll);
       } catch (e: any) {

@@ -217,7 +217,7 @@ export function getCurrentUser(): UserInfo | null {
 }
 
 // Check if user is authenticated
-export function isAuthenticated(): boolean {
+export async function isAuthenticated(): Promise<boolean> {
     // If we have a token in state, check expiry
     if (authState.token && authState.expiresAt) {
         if (Date.now() > authState.expiresAt) {
@@ -275,7 +275,7 @@ async function request<T>(
     options?: RequestInit,
 ): Promise<T> {
     // Ensure we're authenticated
-    if (!isAuthenticated()) {
+    if (!(await isAuthenticated())) {
         throw new Error("Not authenticated");
     }
 
@@ -335,12 +335,13 @@ export interface Project { id: string; name: string; path: string; created_at?: 
 export interface CheckRun { id: string; project_id: string; status: string; score?: number; risk_level?: string; result?: any; start_time?: string; [k: string]: any; }
 export interface Finding { id?: string; severity: string; category: string; description: string; file_path?: string; line_start?: number; [k: string]: any; }
 export interface Policy { id: string; name: string; description?: string; version?: string; frozen?: boolean; rules?: any[]; [k: string]: any; }
+export interface AuditEntry { id: string; timestamp: string; action: string; detail: string; [k: string]: any; }
 
 // ============================================================================
 // API client object
 // ============================================================================
 export const api = {
-  isAuthenticated: () => Promise.resolve(!!getStoredToken()),
+  isAuthenticated: () => !!getStoredToken(),
   health: () => fetch(`${API_BASE}/health`).then(r => r.json()),
   login: (creds: LoginCredentials) => login(creds),
   logout: () => logout(),
