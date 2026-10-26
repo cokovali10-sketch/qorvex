@@ -52,7 +52,7 @@ export function CheckDetail() {
         </div>
         <div className="stat-card">
           <div className="stat-label">Duration</div>
-          <div className="stat-value">{duration(check.start_time, check.end_time)}</div>
+          <div className="stat-value">{duration(check.start_time || "", check.end_time || "")}</div>
         </div>
       </div>
 
@@ -66,7 +66,7 @@ export function CheckDetail() {
               <tr><th>Stage</th><th>Status</th><th>Duration</th><th>Error</th></tr>
             </thead>
             <tbody>
-              {check.stages.map((s) => (
+              {check.stages.map((s: any) => (
                 <tr key={s.name}>
                   <td className="mono">{s.name}</td>
                   <td><span className={`badge badge-${s.status}`}>{s.status}</span></td>
@@ -100,7 +100,7 @@ export function CheckDetail() {
                 <tr><th>Severity</th><th>Category</th><th>Description</th><th>File</th><th>CWE</th></tr>
               </thead>
               <tbody>
-                {check.result.findings?.map((f, i) => (
+                {check.result.findings?.map((f: any, i: any) => (
                   <tr key={f.id || i}>
                     <td><span className={`badge badge-${f.severity}`}>{f.severity}</span></td>
                     <td>{f.category}</td>

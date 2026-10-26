@@ -72,7 +72,7 @@ export function Projects() {
                 <a href={`/projects/${p.id}`} className="link">{p.name}</a>
               </td>
               <td className="mono">{p.path}</td>
-              <td>{new Date(p.created_at).toLocaleDateString()}</td>
+              <td>{new Date(p.created_at || "").toLocaleDateString()}</td>
               <td>
                 <button className="btn btn-sm" onClick={() => startCheck(p.id)}>
                   Run Check

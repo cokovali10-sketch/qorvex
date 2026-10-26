@@ -46,7 +46,7 @@ export function ProjectDetail() {
                   <td className="mono">{c.id.slice(0, 12)}…</td>
                   <td><span className={`badge badge-${c.status}`}>{c.status}</span></td>
                   <td>{c.result?.score ?? "-"}</td>
-                  <td>{new Date(c.start_time).toLocaleString()}</td>
+                  <td>{new Date(c.start_time || "").toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>

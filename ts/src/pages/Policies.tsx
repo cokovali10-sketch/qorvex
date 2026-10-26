@@ -22,7 +22,7 @@ export function Policies() {
           </div>
           {expanded === p.id && (
             <div className="policy-rules">
-              {p.rules.map((r) => (
+              {(p.rules || []).map((r) => (
                 <div key={r.id} className="rule-row">
                   <span className={`badge badge-${r.severity}`}>{r.severity}</span>
                   <span>{r.category}</span>

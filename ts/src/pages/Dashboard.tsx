@@ -187,7 +187,7 @@ export function Dashboard() {
                       {riskLabels[c.result?.risk_level || "pending"]}
                     </span>
                   </td>
-                  <td>{duration(c.start_time, c.end_time)}</td>
+                  <td>{duration(c.start_time || "", c.end_time || "")}</td>
                 </tr>
               ))}
             </tbody>
@@ -214,7 +214,7 @@ export function Dashboard() {
                   </td>
                   <td>{p.version}</td>
                   <td>{p.frozen ? "🔒" : ""}</td>
-                  <td>{p.rules.length}</td>
+                  <td>{(p.rules || []).length}</td>
                   <td>
                     <button className="btn btn-sm" onClick={() => navigate(`/policies/${p.id}`)}>
                       View
@@ -356,7 +356,7 @@ export function CheckPage() {
               <tr><th>Stage</th><th>Status</th><th>Start</th><th>End</th><th>Error</th></tr>
             </thead>
             <tbody>
-              {check.stages.map((s) => (
+              {check.stages.map((s: any) => (
                 <tr key={s.name}>
                   <td className="mono">{s.name}</td>
                   <td>
@@ -405,7 +405,7 @@ export function CheckPage() {
                 </tr>
               </thead>
               <tbody>
-                {check.result.findings?.map((f, i) => (
+                {check.result.findings?.map((f: any, i: any) => (
                   <tr key={f.id || i}>
                     <td>
                       <span className={`badge badge-${f.severity}`}>

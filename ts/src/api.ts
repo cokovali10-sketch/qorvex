@@ -114,7 +114,8 @@ export function login(credentials: LoginCredentials): Promise<LoginResponse> {
                 };
                 throw new Error(authState.error);
             }
-            return res.json();
+            const data = (await res.json()) as LoginResponse;
+            return data;
         })
         .then((data: LoginResponse) => {
             setTokens(data.access_token, data.refresh_token, data.user);
