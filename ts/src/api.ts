@@ -328,5 +328,37 @@ export async function del<T>(endpoint: string): Promise<T> {
     return request<T>(endpoint, { method: "DELETE" });
 }
 
-// Export types for use in components
-export { type LoginCredentials, type LoginResponse, type UserInfo, type AuthState, type LoginOptions };
+// ============================================================================
+// Domain types
+// ============================================================================
+export interface Project { id: string; name: string; path: string; created_at?: string; [k: string]: any; }
+export interface CheckRun { id: string; project_id: string; status: string; score?: number; risk_level?: string; result?: any; start_time?: string; [k: string]: any; }
+export interface Finding { id?: string; severity: string; category: string; description: string; file_path?: string; line_start?: number; [k: string]: any; }
+export interface Policy { id: string; name: string; description?: string; version?: string; frozen?: boolean; rules?: any[]; [k: string]: any; }
+
+// ============================================================================
+// API client object
+// ============================================================================
+export const api = {
+  isAuthenticated: () => Promise.resolve(!!getStoredToken()),
+  health: () => fetch(`${API_BASE}/health`).then(r => r.json()),
+  login: (creds: LoginCredentials) => login(creds),
+  logout: () => logout(),
+  projects: {
+    list: () => get<Project[]>(`/projects`),
+    create: (name: string, path: string) => post<Project, {name:string;path:string}>(`/projects`, {name, path}),
+    checks: (id: string) => get<CheckRun[]>(`/projects/${id}/checks`),
+    findings: (id: string) => get<Finding[]>(`/projects/${id}/findings`),
+  },
+  checks: {
+    get: (id: string) => get<CheckRun>(`/checks/${id}`),
+    start: (id: string) => post<CheckRun, {}>(`/checks/${id}/start`, {}),
+  },
+  policies: {
+    list: () => get<Policy[]>(`/policies`),
+  },
+  audit: {
+    list: () => get<any[]>(`/audit`),
+    verify: () => get<any>(`/audit/verify`),
+  },
+};
