@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"qorvex/pkg/audit"
 	"qorvex/pkg/orchestrator"
@@ -16,6 +19,19 @@ import (
 	"qorvex/pkg/store"
 )
 
+func testToken(role Role) string {
+	claims := Claims{
+		Username: "testuser",
+		Role:     role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, _ := token.SignedString([]byte("test-jwt-secret"))
+	return signed
+}
+
 func newTestServer(t *testing.T) (*Server, *store.Store, *audit.Logger) {
 	t.Helper()
 	s := store.New()
@@ -23,10 +39,10 @@ func newTestServer(t *testing.T) (*Server, *store.Store, *audit.Logger) {
 	pe := policy.NewEngine()
 	orch := orchestrator.NewOrchestrator(s)
 	orch.SetAuditor(al)
-	return NewServer(s, al, pe, orch), s, al
+	return NewServer(s, al, pe, orch, "test-jwt-secret"), s, al
 }
 
-func doRequest(t *testing.T, srv *Server, method, path string, body any) *httptest.ResponseRecorder {
+func doRequest(t *testing.T, srv *Server, method, path string, body any, role Role) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
@@ -40,6 +56,7 @@ func doRequest(t *testing.T, srv *Server, method, path string, body any) *httpte
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken(role))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	return rec
@@ -47,7 +64,7 @@ func doRequest(t *testing.T, srv *Server, method, path string, body any) *httpte
 
 func TestHealth(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/health", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/health", nil, RoleViewer)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
@@ -62,7 +79,7 @@ func TestHealth(t *testing.T) {
 
 func TestCreateProjectRequiresName(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]string{"path": "."})
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]string{"path": "."}, RoleAdmin)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
 	}
@@ -75,7 +92,7 @@ func TestCreateProject(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", map[string]string{
 		"name": "demo",
 		"path": dir,
-	})
+	}, RoleAdmin)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -107,7 +124,7 @@ func TestCreateProject(t *testing.T) {
 
 func TestGetProjectNotFound(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/missing", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/missing", nil, RoleViewer)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
 	}
@@ -121,7 +138,7 @@ func TestStartCheckInvalidPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+p.ID+"/checks", nil)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+p.ID+"/checks", nil, RoleAdmin)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid project path, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -136,7 +153,7 @@ func TestStartCheckAccepted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+p.ID+"/checks", nil)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+p.ID+"/checks", nil, RoleAdmin)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -151,7 +168,7 @@ func TestStartCheckAccepted(t *testing.T) {
 
 func TestListPolicies(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/policies", nil, RoleViewer)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
@@ -171,7 +188,7 @@ func TestSaveAndGetPolicy(t *testing.T) {
 		"rules": []map[string]string{
 			{"id": "block-high", "severity": "block", "category": "security", "pattern": "high|critical", "description": "block high"},
 		},
-	})
+	}, RoleAdmin)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -180,7 +197,7 @@ func TestSaveAndGetPolicy(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
 		t.Fatal(err)
 	}
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/policies/"+p.ID, nil)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/policies/"+p.ID, nil, RoleViewer)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
@@ -192,7 +209,7 @@ func TestAuditVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/audit/verify", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/audit/verify", nil, RoleAdmin)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}

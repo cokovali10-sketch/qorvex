@@ -1,34 +1,55 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"qorvex/pkg/audit"
 	"qorvex/pkg/orchestrator"
 	"qorvex/pkg/platform"
 	"qorvex/pkg/policy"
+	"qorvex/pkg/report"
 	"qorvex/pkg/store"
 )
 
-// Server is the REST API server for Qorvex.
-type Server struct {
-	store        *store.Store
-	auditor      *audit.Logger
-	policyEngine *policy.Engine
-	orchestrator *orchestrator.Orchestrator
-	mux          *http.ServeMux
+// Role represents user roles.
+type Role string
+
+const (
+	RoleAdmin  Role = "admin"
+	RoleViewer Role = "viewer"
+)
+
+// Claims represents JWT claims with role.
+type Claims struct {
+	Username string `json:"username"`
+	Role     Role   `json:"role"`
+	jwt.RegisteredClaims
 }
 
-func NewServer(s *store.Store, al *audit.Logger, pe *policy.Engine, o *orchestrator.Orchestrator) *Server {
+// Server is the REST API server for Qorvex.
+type Server struct {
+	store         *store.Store
+	auditor       *audit.Logger
+	policyEngine  *policy.Engine
+	orchestrator  *orchestrator.Orchestrator
+	mux           *http.ServeMux
+	jwtSecret     []byte
+}
+
+func NewServer(s *store.Store, al *audit.Logger, pe *policy.Engine, o *orchestrator.Orchestrator, jwtSecret string) *Server {
 	sv := &Server{
-		store:        s,
-		auditor:      al,
-		policyEngine: pe,
-		orchestrator: o,
+		store:         s,
+		auditor:       al,
+		policyEngine:  pe,
+		orchestrator:  o,
+		jwtSecret:     []byte(jwtSecret),
 	}
 	sv.setupRoutes()
 	return sv
@@ -37,31 +58,30 @@ func NewServer(s *store.Store, al *audit.Logger, pe *policy.Engine, o *orchestra
 func (s *Server) setupRoutes() {
 	mux := http.NewServeMux()
 
-	// Health
+	// Public routes
 	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 
-	// Projects
-	mux.HandleFunc("GET /api/v1/projects", s.handleListProjects)
-	mux.HandleFunc("POST /api/v1/projects", s.handleCreateProject)
-	mux.HandleFunc("GET /api/v1/projects/{id}", s.handleGetProject)
+	// Protected routes with auth
+	mux.Handle("GET /api/v1/projects", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleListProjects))))
+	mux.Handle("POST /api/v1/projects", s.withAuth(s.withRole(RoleAdmin)(http.HandlerFunc(s.handleCreateProject))))
+	mux.Handle("GET /api/v1/projects/{id}", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleGetProject))))
 
-	// Checks
-	mux.HandleFunc("POST /api/v1/projects/{id}/checks", s.handleStartCheck)
-	mux.HandleFunc("GET /api/v1/checks/{id}", s.handleGetCheck)
-	mux.HandleFunc("GET /api/v1/projects/{id}/checks", s.handleListChecks)
+	mux.Handle("POST /api/v1/projects/{id}/checks", s.withAuth(s.withRole(RoleAdmin)(http.HandlerFunc(s.handleStartCheck))))
+	mux.Handle("GET /api/v1/checks/{id}", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleGetCheck))))
+	mux.Handle("GET /api/v1/projects/{id}/checks", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleListChecks))))
 
-	// Findings
-	mux.HandleFunc("GET /api/v1/projects/{id}/findings", s.handleListFindings)
+	mux.Handle("GET /api/v1/projects/{id}/findings", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleListFindings))))
 
-	// Policies
-	mux.HandleFunc("GET /api/v1/policies", s.handleListPolicies)
-	mux.HandleFunc("POST /api/v1/policies", s.handleSavePolicy)
-	mux.HandleFunc("GET /api/v1/policies/{id}", s.handleGetPolicy)
+	// Export endpoint
+	mux.Handle("GET /api/v1/checks/{id}/export", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleExportCheck))))
 
-	// Audit
-	mux.HandleFunc("GET /api/v1/audit", s.handleListAudit)
-	mux.HandleFunc("GET /api/v1/audit/verify", s.handleVerifyAudit)
-	mux.HandleFunc("GET /api/v1/audit/stats", s.handleAuditStats)
+	mux.Handle("GET /api/v1/policies", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleListPolicies))))
+	mux.Handle("POST /api/v1/policies", s.withAuth(s.withRole(RoleAdmin)(http.HandlerFunc(s.handleSavePolicy))))
+	mux.Handle("GET /api/v1/policies/{id}", s.withAuth(s.withRole(RoleViewer, RoleAdmin)(http.HandlerFunc(s.handleGetPolicy))))
+
+	mux.Handle("GET /api/v1/audit", s.withAuth(s.withRole(RoleAdmin)(http.HandlerFunc(s.handleListAudit))))
+	mux.Handle("GET /api/v1/audit/verify", s.withAuth(s.withRole(RoleAdmin)(http.HandlerFunc(s.handleVerifyAudit))))
+	mux.Handle("GET /api/v1/audit/stats", s.withAuth(s.withRole(RoleAdmin)(http.HandlerFunc(s.handleAuditStats))))
 
 	s.mux = mux
 }
@@ -260,4 +280,77 @@ func extractBearerToken(r *http.Request) (string, bool) {
 		return auth[7:], true
 	}
 	return "", false
+}
+
+// withAuth validates JWT and passes claims to handler.
+func (s *Server) withAuth(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenStr, ok := extractBearerToken(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "missing or invalid authorization header")
+			return
+		}
+		claims := &Claims{}
+		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+			return s.jwtSecret, nil
+		})
+		if err != nil || !token.Valid {
+			writeError(w, http.StatusUnauthorized, "invalid or expired token")
+			return
+		}
+		ctx := context.WithValue(r.Context(), "claims", claims)
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// withRole restricts access to specified roles.
+func (s *Server) withRole(roles ...Role) func(http.Handler) http.Handler {
+	return func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := r.Context().Value("claims").(*Claims)
+			if !ok {
+				writeError(w, http.StatusForbidden, "missing claims")
+				return
+			}
+			for _, role := range roles {
+				if claims.Role == role {
+					h.ServeHTTP(w, r)
+					return
+				}
+			}
+			writeError(w, http.StatusForbidden, "insufficient permissions")
+		})
+	}
+}
+
+// handleExportCheck exports a check run report in specified format (json, sarif, html).
+func (s *Server) handleExportCheck(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "json"
+	}
+
+	run, err := s.orchestrator.GetCheckStatus(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "check not found")
+		return
+	}
+
+	data, err := report.Format(format, run)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	switch format {
+	case "html":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case "sarif":
+		w.Header().Set("Content-Type", "application/sarif+json")
+	default:
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }

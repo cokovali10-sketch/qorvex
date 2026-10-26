@@ -25,7 +25,7 @@ func main() {
 	orch := orchestrator.NewOrchestrator(s)
 	orch.SetAuditor(auditor)
 
-	server := api.NewServer(s, auditor, pe, orch)
+	server := api.NewServer(s, auditor, pe, orch, "qorvex-jwt-secret-change-in-production")
 
 	// Handle graceful shutdown
 	go func() {
