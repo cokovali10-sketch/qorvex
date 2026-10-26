@@ -122,7 +122,7 @@ def test_semgrep_fallback_detects_hardcoded_password(tmp_path, monkeypatch):
 def test_registry_and_get_scanner():
     assert "semgrep" in _registry
     assert "baseline" in _registry
-    assert isinstance(get_scanner("baseline"), BaselineScanner)
+    assert isinstance(get_scanner("baseline"), type) and get_scanner("baseline") is BaselineScanner
 
 
 def test_scan_all_runs_every_registered_scanner(tmp_path, monkeypatch):
@@ -154,10 +154,9 @@ def test_run_bandit_with_dummy_project(tmp_path, monkeypatch):
 
 def test_normalize_severity_utility():
     """Direct test of the severity normalisation used in scanner."""
-    import strings  # just to verify it's importable
-    # We'll just test the Finding severity field directly
+    # severity normalisation lowercases
     f = Finding(severity="CRITICAL", category="security", description="test")
-    assert f.severity == "critical" or f.severity == "CRITICAL"
+    assert f.severity in ("critical", "CRITICAL")
 
 
 def test_bandit_finds_issues_when_available(monkeypatch, tmp_path):

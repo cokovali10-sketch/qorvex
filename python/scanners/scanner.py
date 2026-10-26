@@ -314,57 +314,11 @@ def scan_all(project_path: str) -> list[ScanResult]:
 
 def scan_with(project_path: str, scanner_name: str) -> ScanResult:
     """Run a specific scanner."""
-    scanner_cls = get_scanner(scanner_name)
-    scanner = scanner_cls()
-    return scanner.scan(project_path)
 
-# ---------------------------------------------------------------------------
-# Scanner registry (used by CLI and package init)
-# ---------------------------------------------------------------------------
-
-_registry: dict[str, type] = {}
+register_scanner('semgrep', SemgrepScanner)
+register_scanner('baseline', BaselineScanner)
 
 
-def register_scanner(name: str, cls: type):
-    """Register a scanner by name."""
-    _registry[name] = cls
-
-
-def get_scanner(name: str) -> type:
-    """Get scanner class by name."""
-    if name not in _registry:
-        raise KeyError(f"Scanner '{name}' not registered")
-    return _registry[name]
-
-
-def scan_all(project_path: str) -> list[ScanResult]:
-    """Run all registered scanners against a project."""
-    results: list[ScanResult] = []
-    for name, cls in _registry.items():
-        try:
-            scanner = cls()
-            results.append(scanner.scan(project_path))
-        except Exception as exc:
-            results.append(ScanResult(
-                scanner_name=name,
-                findings=[],
-                errors=[str(exc)],
-                elapsed_ms=0,
-            ))
-    return results
-
-
-def scan_with(project_path: str, scanner_name: str) -> ScanResult:
-    """Run a specific scanner."""
-    scanner_cls = get_scanner(scanner_name)
-    scanner = scanner_cls()
-    return scanner.scan(project_path)
-
-
-
-# ---------------------------------------------------------------------------
-# Bandit scanner integration
-# ---------------------------------------------------------------------------
 
 def run_bandit(project_path: str, timeout: int = 120) -> List[Finding]:
     """Run bandit security scanner and return findings.
