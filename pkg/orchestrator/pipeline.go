@@ -2,11 +2,10 @@ package orchestrator
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
-	"qorvex/pkg/forge"
+	"qorvex/pkg/audit"
 	"qorvex/pkg/platform"
 	"qorvex/pkg/store"
 )
@@ -19,10 +18,10 @@ type Pipeline struct {
 
 // StageDef defines a pipeline stage.
 type StageDef struct {
-	Name        string
-	StageFunc   func(*platform.CheckRun, *store.Store) ([]platform.Finding, error)
-	TimeoutSec  int
-	Critical    bool // if true, stage failure fails the entire check
+	Name       string
+	StageFunc  StageFunc
+	TimeoutSec int
+	Critical   bool // if true, stage failure fails the entire check
 }
 
 // NewPipeline creates the full verification pipeline.
@@ -45,70 +44,161 @@ func NewPipeline() *Pipeline {
 
 // RunAsync executes the pipeline asynchronously and returns immediately.
 // Results are written back to the store when stages complete.
-func (p *Pipeline) RunAsync(run *platform.CheckRun, s *store.Store) {
+//
+// Stages are synchronous: each stage must bound its own I/O using
+// StageContext.Deadline. The budget is re-checked after every stage so a
+// stage that ignores its deadline still fails closed.
+func (p *Pipeline) RunAsync(run *platform.CheckRun, s *store.Store, auditors ...*audit.Logger) {
+	var auditor *audit.Logger
+	if len(auditors) > 0 {
+		auditor = auditors[0]
+	}
+
 	go func() {
+		// Work on a private copy: the caller's pointer is never mutated, so
+		// API responses cannot race with pipeline progress.
+		run = run.Clone()
 		run.Status = "running"
 		run.StartTime = time.Now()
+		run.Stages = make([]platform.Stage, 0, len(p.stages))
 		_ = s.UpdateCheckRun(run)
 
+		meta := map[string]any{}
 		var allFindings []platform.Finding
 
 		for _, stage := range p.stages {
-			findings, err := stage.StageFunc(run, s)
-			if err != nil {
-				if stage.Critical {
-					run.Status = "failed"
-					run.Error = fmt.Sprintf("critical stage %q failed: %v", stage.Name, err)
-					run.EndTime = time.Now()
-					_ = s.UpdateCheckRun(run)
-					return
-				}
-				findings = append(findings, platform.Finding{
-					ProjectID:  run.ProjectID,
-					Severity:   "low",
-					Category:   "quality",
-					Description: fmt.Sprintf("non-critical stage %q encountered error: %v", stage.Name, err),
+			stageStart := time.Now()
+			deadline := stageStart.Add(time.Duration(stage.TimeoutSec) * time.Second)
+			ctx := &StageContext{
+				Run:      run,
+				Store:    s,
+				Findings: allFindings,
+				Meta:     meta,
+				Deadline: deadline,
+			}
+
+			findings, err := stage.StageFunc(ctx)
+			if err == nil && time.Now().After(deadline) {
+				err = fmt.Errorf("stage exceeded its %ds budget", stage.TimeoutSec)
+			}
+
+			record := platform.Stage{
+				Name:      stage.Name,
+				StartTime: stageStart,
+				EndTime:   time.Now(),
+			}
+
+			if err != nil && stage.Critical {
+				record.Status = "failed"
+				record.Error = err.Error()
+				run.Stages = append(run.Stages, record)
+				run.Status = "failed"
+				run.Error = fmt.Sprintf("critical stage %q failed: %v", stage.Name, err)
+				run.EndTime = time.Now()
+				_ = s.UpdateCheckRun(run)
+				appendAudit(s, auditor, &platform.AuditEntry{
+					Actor:      "system",
+					Action:     "pipeline.failed",
+					ResourceID: run.ID,
+					Detail:     fmt.Sprintf("stage=%s error=%v", stage.Name, err),
 				})
+				return
+			}
+
+			if err != nil {
+				record.Status = "completed_with_errors"
+				record.Error = err.Error()
+				findings = append(findings, platform.Finding{
+					ProjectID:   run.ProjectID,
+					CheckRunID:  run.ID,
+					Severity:    "low",
+					Category:    "quality",
+					Description: fmt.Sprintf("non-critical stage %q encountered an error: %v", stage.Name, err),
+					RuleID:      "stage-error:" + stage.Name,
+				})
+			} else {
+				record.Status = "completed"
+			}
+			run.Stages = append(run.Stages, record)
+
+			for i := range findings {
+				if findings[i].ProjectID == "" {
+					findings[i].ProjectID = run.ProjectID
+				}
+				if findings[i].CheckRunID == "" {
+					findings[i].CheckRunID = run.ID
+				}
 			}
 			allFindings = append(allFindings, findings...)
-			_ = s.AppendAudit(&platform.AuditEntry{
+			_ = s.UpdateCheckRun(run)
+
+			appendAudit(s, auditor, &platform.AuditEntry{
 				Actor:      "system",
 				Action:     fmt.Sprintf("pipeline.stage.%s", stage.Name),
 				ResourceID: run.ID,
-				Detail:     fmt.Sprintf("completed with %d findings", len(findings)),
+				Detail:     fmt.Sprintf("status=%s findings=%d", record.Status, len(findings)),
 			})
 		}
 
-		// Build final report
-		score := calculateScore(allFindings)
-		report := &platform.Report{
-			CheckRunID: run.ID,
-			Score:      score,
-			Findings:   allFindings,
-			Summary:    fmt.Sprintf("Score: %.1f/100. %d findings.", score, len(allFindings)),
+		// Deduplicate before scoring so duplicated scanner output cannot
+		// inflate the penalty.
+		allFindings = dedupeFindings(allFindings)
+		for i := range allFindings {
+			allFindings[i].ProjectID = run.ProjectID
+			allFindings[i].CheckRunID = run.ID
 		}
 
-		run.Result = report
+		if run.Result == nil {
+			run.Result = buildReport(run, allFindings, meta)
+		} else {
+			run.Result.CheckRunID = run.ID
+			run.Result.Findings = allFindings
+			run.Result.Score = calculateScore(allFindings)
+			run.Result.SeverityCounts = severityCounts(allFindings)
+			if run.Result.RiskLevel == "" {
+				run.Result.RiskLevel = riskFromFindings(allFindings)
+			}
+			run.Result.Summary = fmt.Sprintf(
+				"Score %.1f/100; risk %s; %d finding(s): %d critical, %d high, %d medium, %d low",
+				run.Result.Score, run.Result.RiskLevel, len(allFindings),
+				run.Result.SeverityCounts["critical"], run.Result.SeverityCounts["high"],
+				run.Result.SeverityCounts["medium"], run.Result.SeverityCounts["low"],
+			)
+		}
+
+		// Fail closed: a critical risk blocks the check even when the
+		// weighted score alone would remain above the threshold.
 		run.Status = "completed"
-		if score < 50 {
+		if run.Result.Score < 50 || run.Result.RiskLevel == "critical" {
 			run.Status = "failed"
 		}
 		run.EndTime = time.Now()
 		_ = s.UpdateCheckRun(run)
 
-		// Store findings
 		for i := range allFindings {
-			allFindings[i].CheckRunID = run.ID
 			_ = s.CreateFinding(&allFindings[i])
 		}
 
-		_ = s.AppendAudit(&platform.AuditEntry{
+		appendAudit(s, auditor, &platform.AuditEntry{
 			Actor:      "system",
 			Action:     "pipeline.complete",
 			ResourceID: run.ID,
-			Detail:     fmt.Sprintf("status=%s score=%.1f findings=%d", run.Status, score, len(allFindings)),
+			Detail:     fmt.Sprintf("status=%s score=%.1f risk=%s findings=%d", run.Status, run.Result.Score, run.Result.RiskLevel, len(allFindings)),
 		})
 	}()
+}
+
+// appendAudit writes to the store log and, when configured, to the signed
+// HMAC audit log used by the API.
+func appendAudit(s *store.Store, al *audit.Logger, entry *platform.AuditEntry) {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	_ = s.AppendAudit(entry)
+	if al != nil {
+		copied := *entry
+		_ = al.Append(&copied)
+	}
 }
 
 func calculateScore(findings []platform.Finding) float64 {
@@ -134,130 +224,10 @@ func calculateScore(findings []platform.Finding) float64 {
 	return total
 }
 
-// Stage implementations
-
-func StageDiffReady(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// TODO: implement actual diff retrieval
-	return nil, nil
-}
-
-func StageStructureCheck(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// TODO: implement structure validation
-	return nil, nil
-}
-
-func StageStaticAnalysis(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// Use Forge for project structure and static analysis
-	fc := forge.DefaultForgeClient()
-	project, _ := s.GetProject(run.ProjectID)
-	if project == nil {
-		return nil, fmt.Errorf("project %s not found", run.ProjectID)
-	}
-
-	result, err := fc.Audit(project.Path)
-	if err != nil {
-		return nil, fmt.Errorf("forge audit failed: %v", err)
-	}
-
-	var findings []platform.Finding
-	for _, f := range result.Findings {
-		findings = append(findings, toQorvexFinding(f))
-		// Also add top findings
-		for _, top := range result.Top {
-			findings = append(findings, platform.Finding{
-				Severity: inferSeverityFromTop(top),
-				Category: "forge-top",
-				Description: top,
-				ProjectID: run.ProjectID,
-			})
-		}
-	}
-	return findings, nil
-}
-
-func toQorvexFinding(f forge.ForgeFinding) platform.Finding {
-	severity := mapSeverity(f.Severity)
-	return platform.Finding{
-		Severity: severity,
-		Category: "forge-" + f.Category,
-		Description: f.Description,
-		FilePath: f.FilePath,
-		LineStart: f.LineStart,
-		LineEnd: f.LineEnd,
-	}
-}
-
-func mapSeverity(forgeSev string) string {
-	switch forgeSev {
-	case "critical": return "critical"
-	case "high": return "high"
-	case "medium": return "medium"
-	case "low": return "low"
-	default: return "low"
-	}
-}
-
-func inferSeverityFromTop(top string) string {
-	if len(top) == 0 { return "low" }
-	// Format is typically "severity:category:message"
-	for _, sep := range []string{":", " ", "x"} {
-		parts := strings.Split(top, sep)
-		if len(parts) > 0 {
-			s := strings.ToLower(parts[0])
-			if s == "critical" || s == "high" { return s }
-			if s == "medium" { return "medium" }
-			return "low"
-		}
-	}
-	return "low"
-}
-
-func StageDependencyScan(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// Use Forge dependency scanner (via pip-audit integration mock)
-	// For now, return empty - implement when pip-audit is available
-	return nil, nil
-}
-
-func StageSecretScan(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// Use Forge for secrets detection
-	fc := forge.DefaultForgeClient()
-	project, _ := s.GetProject(run.ProjectID)
-	if project == nil {
-		return nil, fmt.Errorf("project %s not found", run.ProjectID)
-	}
-
-	// Execute forge secrets scanner - returns findings
-	_, err := fc.Audit(project.Path) // Forge includes secrets in audit
-	if err != nil {
-		// secrets not found, err might be "no secrets"
-		return nil, nil
-	}
-	return nil, nil
-}
-
-func StageBuildAndTest(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// TODO: execute build inside sandbox
-	return nil, nil
-}
-
-func StageSandboxRun(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// TODO: execute unsafe code in Rust sandbox
-	return nil, nil
-}
-
-func StageRiskAssessment(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// TODO: evaluate overall risk based on findings
-	return nil, nil
-}
-
-func StageReportGeneration(run *platform.CheckRun, s *store.Store) ([]platform.Finding, error) {
-	// TODO: aggregate results into final report
-	return nil, nil
-}
-
 // Orchestrator manages pipeline runs.
 type Orchestrator struct {
 	store    *store.Store
+	auditor  *audit.Logger
 	pipeline *Pipeline
 	mu       sync.Mutex
 	running  map[string]bool
@@ -271,9 +241,19 @@ func NewOrchestrator(s *store.Store) *Orchestrator {
 	}
 }
 
+// SetAuditor attaches the signed audit log used by the API.
+func (o *Orchestrator) SetAuditor(al *audit.Logger) {
+	o.auditor = al
+}
+
 func (o *Orchestrator) StartCheck(projectID string) (*platform.CheckRun, error) {
 	project, err := o.store.GetProject(projectID)
 	if err != nil {
+		return nil, err
+	}
+	// Validate the project root synchronously so callers get an immediate
+	// error instead of an asynchronously failed check.
+	if _, err := resolveProjectRoot(project); err != nil {
 		return nil, err
 	}
 
@@ -282,7 +262,7 @@ func (o *Orchestrator) StartCheck(projectID string) (*platform.CheckRun, error) 
 		return nil, err
 	}
 
-	o.pipeline.RunAsync(run, o.store)
+	o.pipeline.RunAsync(run, o.store, o.auditor)
 
 	o.mu.Lock()
 	o.running[run.ID] = true
@@ -308,7 +288,7 @@ func (o *Orchestrator) CreateProject(name, path string) (*platform.Project, erro
 	if err := o.store.CreateProject(p); err != nil {
 		return nil, err
 	}
-	_ = o.store.AppendAudit(&platform.AuditEntry{
+	appendAudit(o.store, o.auditor, &platform.AuditEntry{
 		Actor:      "user",
 		Action:     "project.create",
 		ResourceID: p.ID,

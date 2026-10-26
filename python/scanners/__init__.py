@@ -1,17 +1,25 @@
 """Qorvex scanners package."""
 
 from .scanner import (
-    Scanner,
+    BaselineScanner,
     Finding,
     ScanResult,
-    Severity,
-    Category,
+    Scanner,
+    SemgrepScanner,
+    get_scanner,
+    register_scanner,
+    scan_all,
+    scan_with,
 )
 
 __all__ = [
-    "Scanner",
+    "BaselineScanner",
     "Finding",
     "ScanResult",
-    "Severity",
-    "Category",
+    "Scanner",
+    "SemgrepScanner",
+    "get_scanner",
+    "register_scanner",
+    "scan_all",
+    "scan_with",
 ]

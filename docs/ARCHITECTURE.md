@@ -1,7 +1,7 @@
 # Qorvex — Архитектура
 
-> Версия: 0.1.0
-> Статус: черновик (Sprint 0)
+> Версия: 0.2.0
+> Статус: рабочий прототип
 
 ## 1. Цели и принципы
 
@@ -81,12 +81,30 @@ qorvex/
 
 ```
 CREATED → DIFF_READY → STRUCT_CHECK → STATIC_ANALYSIS →
-DEPENDENCY_SCAN → BUILD_AND_TEST → SANDBOX_RUN →
-RISK_ASSESS → POLICY_EVAL → REPORT → APPROVED/REJECTED
+DEPENDENCY_SCAN → SECRET_SCAN → BUILD_AND_TEST → SANDBOX_RUN →
+RISK_ASSESS → REPORT → COMPLETED/FAILED
 ```
 
-Каждый переход — событие в аудите. Job может быть отменён; повтор только
-при безопасных условиях (idempotent шаги, lock-файлы фиксации).
+Каждая стадия получает `StageContext` (run, store, накопленные findings, meta,
+deadline) и возвращает findings. Статус, длительность и ошибка сохраняются в
+`CheckRun.Stages` и в audit log.
+
+**Контракты стадий:**
+
+- стадия обязана укладываться в `Deadline`; внешние команды ограничены
+  таймаутом и лимитом вывода;
+- ошибка critical-стадии немедленно завершает run со статусом `failed`;
+- ошибка non-critical стадии превращается в `low` finding, run продолжается;
+- пути строятся только через `safeJoin`, обход дерева ограничен;
+- секреты не попадают в audit log — только путь и номер строки.
+
+**Итоговый статус:**
+
+- `failed`, если score < 50 или `risk_level == "critical"`;
+- иначе `completed`.
+
+Job может быть отменён; повтор только при безопасных условиях
+(idempotent шаги, lock-файлы фиксации).
 
 ## 6. Соглашения
 

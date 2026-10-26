@@ -73,7 +73,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ---- Handlers ----
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.1.0"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.2.0"})
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
@@ -103,29 +103,18 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_ = s.auditor.Append(&platform.AuditEntry{
-		Actor:      "user",
-		Action:     "project.create",
-		ResourceID: project.ID,
-		Detail:     req.Name,
-	})
+	// The orchestrator already records project.create in the signed audit log.
 	writeJSON(w, http.StatusCreated, project)
 }
 
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	project, err := s.orchestrator.ListProjects()
+	project, err := s.store.GetProject(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	for _, p := range project {
-		if p.ID == id {
-			writeJSON(w, http.StatusOK, p)
-			return
-		}
-	}
-	writeError(w, http.StatusNotFound, "project not found")
+	writeJSON(w, http.StatusOK, project)
 }
 
 func (s *Server) handleStartCheck(w http.ResponseWriter, r *http.Request) {

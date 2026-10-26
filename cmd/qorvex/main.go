@@ -16,13 +16,14 @@ import (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Qorvex v0.1.0 — AI Code Verification Platform")
+	log.Println("Qorvex v0.2.0 — AI Code Verification Platform")
 	log.Println("Build. Test. Verify.")
 
 	s := store.New()
 	auditor := audit.NewLogger("qorvex-secret-dev-key-change-in-production", 10000)
 	pe := policy.NewEngine()
 	orch := orchestrator.NewOrchestrator(s)
+	orch.SetAuditor(auditor)
 
 	server := api.NewServer(s, auditor, pe, orch)
 
@@ -41,7 +42,7 @@ func main() {
 	}
 
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("  Qorvex Platform v0.1.0")
+	fmt.Println("  Qorvex Platform v0.2.0")
 	fmt.Println("  API:  http://localhost" + addr)
 	fmt.Println("  Docs: http://localhost" + addr + "/api/v1/health")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

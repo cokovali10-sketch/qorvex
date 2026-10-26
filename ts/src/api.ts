@@ -23,18 +23,41 @@ export interface Project {
   updated_at: string;
 }
 
+export interface Stage {
+  name: string;
+  status: "pending" | "running" | "completed" | "completed_with_errors" | "failed" | "skipped";
+  start_time: string;
+  end_time: string;
+  error?: string;
+}
+
+export interface Report {
+  id?: string;
+  check_run_id?: string;
+  score: number;
+  risk_level?: "low" | "medium" | "high" | "critical";
+  severity_counts?: Record<string, number>;
+  findings: Finding[];
+  summary: string;
+  sbom?: string;
+}
+
 export interface CheckRun {
   id: string;
   project_id: string;
   status: string;
   start_time: string;
   end_time: string;
-  result?: { score: number; summary: string; findings: Finding[] };
+  result?: Report;
   error?: string;
+  stages?: Stage[];
 }
 
 export interface Finding {
-  severity: string;
+  id?: string;
+  check_run_id?: string;
+  project_id?: string;
+  severity: "critical" | "high" | "medium" | "low" | "info";
   category: string;
   description: string;
   file_path?: string;
@@ -42,6 +65,7 @@ export interface Finding {
   line_end?: number;
   cwe?: string;
   remediation?: string;
+  rule_id?: string;
 }
 
 export interface Policy {

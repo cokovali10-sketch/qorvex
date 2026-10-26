@@ -1,7 +1,7 @@
 # Qorvex — Стратегия тестирования
 
-> Версия: 0.1.0
-> Статус: черновик
+> Версия: 0.2.0
+> Статус: актуально для текущего прототипа
 
 ## 1. Пирамида тестов
 
@@ -17,9 +17,23 @@
    └───────────────────────────┘
 ```
 
+Текущее состояние: **106 тестовых функций** в 7 Go-пакетах + **9 Python-тестов**,
+все зелёные.
+
+| Пакет | Что покрыто |
+|-------|-------------|
+| `pkg/platform` | domain types, JSON roundtrip, sandbox defaults |
+| `pkg/store` | CRUD, конкурентный доступ, аудит |
+| `pkg/policy` | правила block/warn/allow, приоритеты, frozen |
+| `pkg/audit` | HMAC-подпись, verify, tamper detection, лимиты |
+| `pkg/forge` | JSON-контракт Forge, severity mapping |
+| `pkg/orchestrator` | path safety, bounded walk, secret rules, парсеры, риск, отчёт, fail-closed |
+| `pkg/api` | health, projects, checks, policies, audit verify, CORS |
+
 ## 2. Unit (Go)
 
-- `go test ./... -race -coverprofile=coverage.out`
+- `go test ./pkg/... -count=1 -v`
+- `go test ./pkg/... -race -coverprofile=coverage.out`
 - Порог покрытия: `go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//'` ≥ 80
 - `go vet`, `staticcheck`, `golangci-lint run`
 
@@ -48,16 +62,18 @@
 
 ## 7. Security (Adversarial)
 
-- Тесты изоляции: `tests/security/isolation_test.go`
-  - net access blocked
-  - fs outside workspace blocked
-  - secrets not leaked
-  - fork bomb OOM killed
-  - seccomp rules enforced
+Реализованные тесты (`pkg/orchestrator/stages_test.go`):
 
-- Dependency confusion: имитация 악意 pkg
+- path traversal отклоняется (`TestSafeJoin`);
+- sibling-каталог с общим префиксом не считается вложенным (`TestIsWithin`);
+- symlink, ведущий за пределы root, даёт `high` finding (`TestStageStructureCheckSymlinkEscape`);
+- обход дерева ограничен и пропускает `.git`/`node_modules` (`TestWalkProject*`);
+- файлы больше лимита не читаются (`TestReadFileBounded`);
+- AWS-ключи и private keys детектируются, placeholder-значения — нет;
+- команды не выполняются через shell, вывод и время ограничены.
 
-- Audit log tamper detection: подпись лога, проверка при чтении
+Не реализовано (roadmap): seccomp/namespace isolation tests, fork-bomb OOM,
+dependency confusion, audit replay.
 
 ## 8. E2E / Smoke
 

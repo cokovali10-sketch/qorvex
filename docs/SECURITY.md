@@ -1,12 +1,12 @@
 # Qorvex — Security Policy
 
-> Версия: 0.1.0
+> Версия: 0.2.0
 
 ## Supported versions
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | ✅ Security fixes |
+| 0.2.x   | ✅ Security fixes |
 
 ## Reporting a vulnerability
 
@@ -20,10 +20,19 @@
 
 ## Hard guarantees платформы
 
-- **Fail-closed:** невозможность запуска проверки = `FAILED`, а не `PASSED`.
-- **Deny-by-default:** sandbox-контейнеры создаются с restrictive security profile.
-- **No host secrets:** анализаторы не получают доступ к secrets окружения.
-- **Policy freeze:** `frozen: true` политики нельзя редактировать пользователем с role ниже `admin`.
+- **Fail-closed:** ошибка critical-стадии или `risk_level=critical` = `FAILED`,
+  а не `PASSED`.
+- **Deny-by-default:** sandbox-конфигурация по умолчанию запрещает сеть,
+  read-only FS и ограничивает память/процессы/файлы.
+- **Minimal environment:** внешние анализаторы получают только PATH и
+  платформенные переменные; секреты родительского процесса не пробрасываются.
+- **Path containment:** все пути канонизируются, absolute/`..`/symlink escape
+  отклоняются.
+- **Immutable audit:** HMAC-SHA256 по каждому событию, проверка через
+  `/api/v1/audit/verify`.
+- **Policy freeze:** флаг `frozen` сохраняется в модели политики; ролевой
+  enforcement (admin-only edit) — в roadmap, до его появления не считать
+  frozen-политику защищённой от записи через API.
 
 ## Safe harbor
 

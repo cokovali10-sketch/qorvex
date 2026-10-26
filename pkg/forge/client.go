@@ -10,9 +10,9 @@ import (
 
 // ForgeScanResult mirrors the Forge audit JSON output.
 type ForgeScanResult struct {
-	Repo    string   `json:"repo"`
-	Score   int      `json:"score"`
-	Verdict string   `json:"verdict"`
+	Repo    string `json:"repo"`
+	Score   int    `json:"score"`
+	Verdict string `json:"verdict"`
 	Counts  struct {
 		High   int `json:"high"`
 		Medium int `json:"medium"`

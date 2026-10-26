@@ -35,7 +35,7 @@ func (s *Store) CreateProject(p *platform.Project) error {
 	p.ID = fmt.Sprintf("proj-%d-%d", time.Now().UnixMilli(), s.counter.Add(1))
 	p.CreatedAt = time.Now()
 	p.UpdatedAt = time.Now()
-	s.projects[p.ID] = p
+	s.projects[p.ID] = p.Clone()
 	return nil
 }
 
@@ -46,7 +46,7 @@ func (s *Store) GetProject(id string) (*platform.Project, error) {
 	if !ok {
 		return nil, fmt.Errorf("project not found: %s", id)
 	}
-	return p, nil
+	return p.Clone(), nil
 }
 
 func (s *Store) ListProjects() ([]*platform.Project, error) {
@@ -54,7 +54,7 @@ func (s *Store) ListProjects() ([]*platform.Project, error) {
 	defer s.mu.RUnlock()
 	res := make([]*platform.Project, 0, len(s.projects))
 	for _, p := range s.projects {
-		res = append(res, p)
+		res = append(res, p.Clone())
 	}
 	return res, nil
 }
@@ -65,7 +65,7 @@ func (s *Store) CreateCheckRun(r *platform.CheckRun) error {
 	r.ID = fmt.Sprintf("chk-%d-%d", time.Now().UnixMilli(), s.counter.Add(1))
 	r.StartTime = time.Now()
 	r.Status = "pending"
-	s.checks[r.ID] = r
+	s.checks[r.ID] = r.Clone()
 	return nil
 }
 
@@ -76,7 +76,7 @@ func (s *Store) GetCheckRun(id string) (*platform.CheckRun, error) {
 	if !ok {
 		return nil, fmt.Errorf("check run not found: %s", id)
 	}
-	return r, nil
+	return r.Clone(), nil
 }
 
 func (s *Store) UpdateCheckRun(r *platform.CheckRun) error {
@@ -85,7 +85,9 @@ func (s *Store) UpdateCheckRun(r *platform.CheckRun) error {
 	if _, ok := s.checks[r.ID]; !ok {
 		return fmt.Errorf("check run not found: %s", r.ID)
 	}
-	s.checks[r.ID] = r
+	// Snapshot the run so callers can keep mutating their own copy without
+	// racing readers of the stored state.
+	s.checks[r.ID] = r.Clone()
 	return nil
 }
 
@@ -95,7 +97,7 @@ func (s *Store) ListCheckRuns(projectID string) ([]*platform.CheckRun, error) {
 	var res []*platform.CheckRun
 	for _, r := range s.checks {
 		if r.ProjectID == projectID {
-			res = append(res, r)
+			res = append(res, r.Clone())
 		}
 	}
 	return res, nil
@@ -105,7 +107,7 @@ func (s *Store) CreateFinding(f *platform.Finding) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f.ID = fmt.Sprintf("fnd-%d-%d", time.Now().UnixMilli(), s.counter.Add(1))
-	s.findings[f.ID] = f
+	s.findings[f.ID] = f.Clone()
 	return nil
 }
 
@@ -115,7 +117,7 @@ func (s *Store) GetFindings(projectID string) ([]*platform.Finding, error) {
 	var res []*platform.Finding
 	for _, f := range s.findings {
 		if f.ProjectID == projectID {
-			res = append(res, f)
+			res = append(res, f.Clone())
 		}
 	}
 	return res, nil
@@ -128,7 +130,7 @@ func (s *Store) AppendAudit(entry *platform.AuditEntry) error {
 	if entry.ID == "" {
 		entry.ID = fmt.Sprintf("aud-%d-%d", time.Now().UnixMilli(), s.counter.Add(1))
 	}
-	s.audit = append(s.audit, entry)
+	s.audit = append(s.audit, entry.Clone())
 	return nil
 }
 
@@ -139,5 +141,9 @@ func (s *Store) ListAudit(limit int) ([]*platform.AuditEntry, error) {
 	if limit > 0 && limit < n {
 		n = limit
 	}
-	return s.audit[len(s.audit)-n:], nil
+	res := make([]*platform.AuditEntry, n)
+	for i, e := range s.audit[len(s.audit)-n:] {
+		res[i] = e.Clone()
+	}
+	return res, nil
 }

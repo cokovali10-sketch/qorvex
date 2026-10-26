@@ -2,9 +2,9 @@ package policy
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"strings"
 	"time"
 
 	"qorvex/pkg/platform"
@@ -167,10 +167,10 @@ type Result struct {
 // Decision for a single finding.
 type Decision struct {
 	Finding     platform.Finding `json:"finding"`
-	Verdict     string            `json:"verdict"`
-	Explanation string            `json:"explanation"`
-	RuleID      string            `json:"rule_id"`
-	PolicyID    string            `json:"policy_id"`
+	Verdict     string           `json:"verdict"`
+	Explanation string           `json:"explanation"`
+	RuleID      string           `json:"rule_id"`
+	PolicyID    string           `json:"policy_id"`
 }
 
 // Merge allows manual overrides of policy verdicts.

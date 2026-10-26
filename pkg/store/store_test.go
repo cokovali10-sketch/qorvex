@@ -106,8 +106,8 @@ func TestCreateFinding(t *testing.T) {
 	s := New()
 	f := &platform.Finding{
 		ProjectID:   "proj-1",
-		Severity:   "high",
-		Category:   "security",
+		Severity:    "high",
+		Category:    "security",
 		Description: "test finding",
 	}
 	err := s.CreateFinding(f)
@@ -193,4 +193,75 @@ func TestConcurrentAccess(t *testing.T) {
 
 	<-done
 	<-done
+}
+
+func TestStoreReturnsCopies(t *testing.T) {
+	s := New()
+	p := &platform.Project{Name: "P", Path: "."}
+	s.CreateProject(p)
+
+	got, _ := s.GetProject(p.ID)
+	got.Name = "mutated"
+	again, _ := s.GetProject(p.ID)
+	if again.Name != "P" {
+		t.Errorf("store leaked a mutable project pointer: %s", again.Name)
+	}
+
+	r := &platform.CheckRun{
+		ProjectID: p.ID,
+		Result: &platform.Report{
+			Score:          90,
+			Findings:       []platform.Finding{{Severity: "low"}},
+			SeverityCounts: map[string]int{"low": 1},
+		},
+		Stages: []platform.Stage{{Name: "diff_ready", Status: "completed"}},
+	}
+	s.CreateCheckRun(r)
+
+	run, _ := s.GetCheckRun(r.ID)
+	run.Result.Score = 0
+	run.Result.Findings[0].Severity = "critical"
+	run.Result.SeverityCounts["low"] = 99
+	run.Stages[0].Status = "failed"
+
+	stored, _ := s.GetCheckRun(r.ID)
+	if stored.Result.Score != 90 {
+		t.Errorf("report score was mutated: %v", stored.Result.Score)
+	}
+	if stored.Result.Findings[0].Severity != "low" {
+		t.Errorf("finding was mutated: %s", stored.Result.Findings[0].Severity)
+	}
+	if stored.Result.SeverityCounts["low"] != 1 {
+		t.Errorf("severity counts were mutated: %v", stored.Result.SeverityCounts)
+	}
+	if stored.Stages[0].Status != "completed" {
+		t.Errorf("stage was mutated: %s", stored.Stages[0].Status)
+	}
+
+	f := &platform.Finding{ProjectID: p.ID, Severity: "high", Category: "security", Description: "x"}
+	s.CreateFinding(f)
+	findings, _ := s.GetFindings(p.ID)
+	findings[0].Severity = "info"
+	againFindings, _ := s.GetFindings(p.ID)
+	if againFindings[0].Severity != "high" {
+		t.Errorf("finding pointer leaked: %s", againFindings[0].Severity)
+	}
+}
+
+func TestUpdateCheckRunSnapshots(t *testing.T) {
+	s := New()
+	r := &platform.CheckRun{ProjectID: "p"}
+	s.CreateCheckRun(r)
+
+	r.Status = "completed"
+	if err := s.UpdateCheckRun(r); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mutating the caller's copy after Update must not change stored state.
+	r.Status = "failed"
+	stored, _ := s.GetCheckRun(r.ID)
+	if stored.Status != "completed" {
+		t.Errorf("expected completed snapshot, got %s", stored.Status)
+	}
 }

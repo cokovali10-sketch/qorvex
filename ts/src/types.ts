@@ -16,12 +16,23 @@ interface CheckRun {
   end_time: string;
   result?: Report;
   error?: string;
+  stages?: Stage[];
+}
+
+interface Stage {
+  name: string;
+  status: "completed" | "completed_with_errors" | "failed";
+  start_time: string;
+  end_time: string;
+  error?: string;
 }
 
 interface Report {
   id: string;
   check_run_id: string;
   score: number;
+  risk_level?: "low" | "medium" | "high" | "critical";
+  severity_counts?: Record<string, number>;
   findings: Finding[];
   summary: string;
   sbom?: string;

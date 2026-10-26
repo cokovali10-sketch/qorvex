@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,6 +28,12 @@ func TestNewPipeline(t *testing.T) {
 		if s.Name != expectedNames[i] {
 			t.Errorf("stage %d: expected %s, got %s", i, expectedNames[i], s.Name)
 		}
+		if s.StageFunc == nil {
+			t.Errorf("stage %d (%s): StageFunc is nil", i, s.Name)
+		}
+		if s.TimeoutSec <= 0 {
+			t.Errorf("stage %d (%s): timeout must be positive", i, s.Name)
+		}
 	}
 }
 
@@ -50,6 +58,7 @@ func TestCalculateScore(t *testing.T) {
 			{Severity: "critical"}, {Severity: "critical"},
 			{Severity: "critical"},
 		}, 0.0},
+		{"info does not affect score", []platform.Finding{{Severity: "info"}}, 100.0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -111,11 +120,22 @@ func TestStartCheckNoProject(t *testing.T) {
 	}
 }
 
+func TestStartCheckInvalidPath(t *testing.T) {
+	s := store.New()
+	o := NewOrchestrator(s)
+
+	p, _ := o.CreateProject("missing", filepath.Join(t.TempDir(), "does-not-exist"))
+	if _, err := o.StartCheck(p.ID); err == nil {
+		t.Error("expected error for missing project path")
+	}
+}
+
 func TestStartCheck(t *testing.T) {
 	s := store.New()
 	o := NewOrchestrator(s)
 
-	p, _ := o.CreateProject("test", "/tmp/test")
+	dir := t.TempDir()
+	p, _ := o.CreateProject("test", dir)
 	run, err := o.StartCheck(p.ID)
 	if err != nil {
 		t.Fatalf("StartCheck() error: %v", err)
@@ -139,9 +159,21 @@ func TestGetCheckStatus(t *testing.T) {
 }
 
 func TestStageFunctions(t *testing.T) {
+	s := store.New()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &platform.Project{Name: "stages", Path: dir}
+	if err := s.CreateProject(p); err != nil {
+		t.Fatal(err)
+	}
+	run := &platform.CheckRun{ID: "test", ProjectID: p.ID}
+
 	tests := []struct {
 		name string
-		fn   func(*platform.CheckRun, *store.Store) ([]platform.Finding, error)
+		fn   StageFunc
 	}{
 		{"StageDiffReady", StageDiffReady},
 		{"StageStructureCheck", StageStructureCheck},
@@ -154,18 +186,30 @@ func TestStageFunctions(t *testing.T) {
 		{"StageReportGeneration", StageReportGeneration},
 	}
 
-	s := store.New()
-	run := &platform.CheckRun{ID: "test", ProjectID: "proj-test"}
+	meta := map[string]any{}
+	var accumulated []platform.Finding
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			findings, err := tt.fn(run, s)
+			ctx := &StageContext{
+				Run:      run,
+				Store:    s,
+				Findings: accumulated,
+				Meta:     meta,
+				Deadline: time.Now().Add(2 * time.Minute),
+			}
+			findings, err := tt.fn(ctx)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
-			if len(findings) > 0 {
-				t.Errorf("expected 0 findings from stub, got %d", len(findings))
-			}
+			accumulated = append(accumulated, findings...)
 		})
+	}
+
+	if run.Result == nil {
+		t.Fatal("report stage should populate run.Result")
+	}
+	if run.Result.CheckRunID != run.ID {
+		t.Errorf("expected report for %s, got %s", run.ID, run.Result.CheckRunID)
 	}
 }
 
@@ -173,7 +217,11 @@ func TestPipelineAsync(t *testing.T) {
 	s := store.New()
 	o := NewOrchestrator(s)
 
-	p, _ := o.CreateProject("test-async", ".")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("print('hello')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := o.CreateProject("test-async", dir)
 	run := &platform.CheckRun{
 		ProjectID: p.ID,
 		Status:    "pending",
@@ -182,30 +230,45 @@ func TestPipelineAsync(t *testing.T) {
 
 	o.pipeline.RunAsync(run, s)
 
-	// Poll with small delays for goroutine to execute
 	var got *platform.CheckRun
 	var err error
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 500; i++ {
 		got, err = o.GetCheckStatus(run.ID)
 		if err != nil {
 			continue
 		}
-		if got.Status != "pending" {
+		if got.Status != "pending" && got.Status != "running" {
+			if len(got.Stages) != 9 {
+				t.Errorf("expected 9 stage records, got %d", len(got.Stages))
+			}
+			if got.Result == nil {
+				t.Error("expected report on completion")
+			}
 			return
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("pipeline async goroutine did not execute within timeout, status=%s", got.Status)
+	t.Fatalf("pipeline async goroutine did not complete within timeout, status=%s", got.Status)
 }
 
-func TestStageSecretsBlocks(t *testing.T) {
+func TestPipelineFailClosedOnMissingProject(t *testing.T) {
 	s := store.New()
-	run := &platform.CheckRun{ID: "test", ProjectID: "proj-test"}
-	findings, err := StageSecretScan(run, s)
-	if err != nil {
-		t.Errorf("secret scan failed: %v", err)
+	o := NewOrchestrator(s)
+
+	run := &platform.CheckRun{ProjectID: "missing", Status: "pending"}
+	s.CreateCheckRun(run)
+	o.pipeline.RunAsync(run, s)
+
+	var got *platform.CheckRun
+	for i := 0; i < 200; i++ {
+		got, _ = o.GetCheckStatus(run.ID)
+		if got != nil && got.Status == "failed" {
+			if got.Error == "" {
+				t.Error("failed run should carry an error")
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if len(findings) != 0 {
-		t.Errorf("expected 0 findings from stub, got %d", len(findings))
-	}
+	t.Fatalf("expected failed status for missing project, got %v", got)
 }

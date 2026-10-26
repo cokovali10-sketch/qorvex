@@ -1,26 +1,29 @@
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "qorvex-scanners"
-version = "0.1.0"
+version = "0.2.0"
 description = "Qorvex code analysis scanners"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
 ]
-optional-dependencies = {
-    "full": [
-        "semgrep>=1.0",
-        "bandit>=1.7",
-        "pip-audit>=2.7",
-        "cyclonedx-bom>=4.0",
-    ],
-}
+
+[project.optional-dependencies]
+full = [
+    "semgrep>=1.0",
+    "bandit>=1.7",
+    "pip-audit>=2.7",
+    "cyclonedx-bom>=4.0",
+]
 
 [project.scripts]
-qorvex-scan = "qorvex_scanners.cli:main"
+qorvex-scan = "scanners.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["qorvex_scanners*"]
+include = ["scanners*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

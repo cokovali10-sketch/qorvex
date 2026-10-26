@@ -6,12 +6,14 @@
 # Go
 *.test
 *.out
+.testbin/
 
 # Rust
 rust/target/
 
 # Python
-python/__pycache__/
+__pycache__/
+*.py[cod]
 python/*.egg-info/
 python/.venv/
 python/venv/

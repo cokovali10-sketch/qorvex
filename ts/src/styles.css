@@ -147,6 +147,7 @@ h2 { font-size: 1.2rem; margin-bottom: 12px; color: var(--text-dim); }
 
 .badge-pending, .badge-running { background: #1e293b; color: #93c5fd; }
 .badge-completed { background: #14532d; color: var(--green); }
+.badge-completed_with_errors { background: #3b2f00; color: var(--yellow); }
 .badge-failed { background: #450a0a; color: var(--red); }
 .badge-frozen { background: #2d1b69; color: #a78bfa; }
 

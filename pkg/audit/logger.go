@@ -99,9 +99,9 @@ func (l *Logger) GetStats() map[string]interface{} {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	stats := map[string]interface{}{
-		"total_entries":  len(l.entries),
-		"max_entries":    l.maxLimit,
-		"capacity_used":  fmt.Sprintf("%.1f%%", float64(len(l.entries))/float64(l.maxLimit)*100),
+		"total_entries": len(l.entries),
+		"max_entries":   l.maxLimit,
+		"capacity_used": fmt.Sprintf("%.1f%%", float64(len(l.entries))/float64(l.maxLimit)*100),
 	}
 	return stats
 }
