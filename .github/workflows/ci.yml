@@ -1,0 +1,59 @@
+name: Qorvex CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Lint Go
+        run: |
+          go vet ./...
+          golangci-lint run --timeout 5m ./pkg/...
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Run Go tests
+        run: go test ./pkg/... -count=1
+      - name: Run Python tests
+        run: cd python && python -m pytest tests -q
+      - name: Run TypeScript build
+        run: cd ts && npm run build
+
+  security:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run security tests
+        run: go test -tags=security ./pkg/orchestrator/... -count=1
+
+  docker:
+    needs: security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t cokovali10-sketch/qorvex:latest .
+      - name: Push Docker image
+        if: github.ref == 'refs/heads/master'
+        run: |
+          echo "${{ secrets.GH_TOKEN }}" | docker login ghcr.io -u cokovali10-sketch --password-stdin
+          docker tag cokovali10-sketch/qorvex:latest ghcr.io/cokovali10-sketch/qorvex:latest
+          docker push ghcr.io/cokovali10-sketch/qorvex:latest

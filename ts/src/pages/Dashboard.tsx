@@ -1,5 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { api, CheckRun, AuditEntry } from "../api";
+import { api, Project, Policy, CheckRun, Finding, AuditEntry } from "../api";
+import { useParams } from "react-router-dom";
+
+function duration(start: string, end: string): string {
+  if (!start || !end) return "running...";
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
 
 export function Dashboard() {
   const [stats, setStats] = useState({
@@ -10,19 +17,53 @@ export function Dashboard() {
   });
   const [recentChecks, setRecentChecks] = useState<CheckRun[]>([]);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [policies, setPolicies] = useState<Policy[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.health().then((h) => setStats((s) => ({ ...s, health: `v${h.version} ${h.status}` })));
-    api.projects.list().then((ps) => {
-      setStats((s) => ({ ...s, projects: ps.length }));
-      ps.slice(0, 5).forEach((p) => {
-        api.projects.checks(p.id).then((checks) => {
-          setRecentChecks((prev) => [...prev, ...checks].slice(0, 10));
-        });
-      });
-    });
-    api.audit.list().then((entries) => setAuditEntries(entries.slice(0, 5)));
+    async function fetchAll() {
+      try {
+        // Health check
+        const h = await api.health();
+        setStats((s) => ({ ...s, health: `v${h.version} ${h.status}` }));
+
+        // Projects
+        const ps = await api.projects.list();
+        setStats((s) => ({ ...s, projects: ps.length }));
+
+        // Recent checks for first 5 projects
+        const checkPromises = ps.slice(0, 5).map((p) => api.projects.checks(p.id));
+        const checkResults = await Promise.all(checkPromises);
+        const flattened = checkResults.flat();
+        setRecentChecks(flattened.slice(0, 10));
+
+        // Policies
+        const pols = await api.policies.list();
+        setPolicies(pols);
+
+        // Audit
+        const entries = await api.audit.list();
+        setAuditEntries(entries.slice(0, 20));
+
+        setLoading(false);
+      } catch (e) {
+        setLoading(false);
+      }
+    }
+
+    fetchAll();
   }, []);
+
+  if (loading) {
+    return (
+      <div className="dashboard">
+        <div className="stat-card">
+          <div className="stat-value">Loading...</div>
+          <div className="stat-label">Initializing</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="dashboard">
@@ -56,15 +97,44 @@ export function Dashboard() {
           <h2>Recent Checks</h2>
           <table className="table">
             <thead>
-              <tr><th>ID</th><th>Status</th><th>Score</th><th>Time</th></tr>
+              <tr><th>ID</th><th>Status</th><th>Score</th><th>Risk</th><th>Time</th></tr>
             </thead>
             <tbody>
-              {recentChecks.slice(0, 5).map((c) => (
+              {recentChecks.map((c) => (
                 <tr key={c.id} className="clickable" onClick={() => window.location.href = `/checks/${c.id}`}>
                   <td className="mono">{c.id.slice(0, 12)}…</td>
                   <td><span className={`badge badge-${c.status}`}>{c.status}</span></td>
                   <td>{c.result?.score ?? "-"}</td>
-                  <td>{new Date(c.start_time).toLocaleString()}</td>
+                  <td><span className={`badge badge-${c.result?.risk_level || "pending"}`}>
+                    {c.result?.risk_level || "pending"}
+                  </span></td>
+                  <td>{duration(c.start_time, c.end_time)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="panel">
+          <h2>Policies</h2>
+          <table className="table">
+            <thead>
+              <tr><th>Name</th><th>Version</th><th>Frozen</th><th>Rules</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              {policies.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    <a href={`/policies/${p.id}`} className="link">{p.name}</a>
+                  </td>
+                  <td>{p.version}</td>
+                  <td>{p.frozen ? "🔒" : "}</td>
+                  <td>{p.rules.length}</td>
+                  <td>
+                    <button className="btn btn-sm" onClick={() => window.location.href = `/policies/${p.id}`}>
+                      View
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -75,13 +145,17 @@ export function Dashboard() {
           <h2>Audit Log</h2>
           <table className="table">
             <thead>
-              <tr><th>Actor</th><th>Action</th><th>Time</th></tr>
+              <tr><th>Actor</th><th>Action</th><th>Resource</th><th>Severity</th><th>Time</th></tr>
             </thead>
             <tbody>
-              {auditEntries.slice(0, 5).map((e) => (
+              {auditEntries.slice(0, 10).map((e) => (
                 <tr key={e.id}>
                   <td>{e.actor}</td>
                   <td className="mono">{e.action}</td>
+                  <td className="mono">{e.resource_id || "-"}</td>
+                  <td>
+                    {e.detail && e.detail.match(/critical|high/i) ? "high" : "low"}
+                  </td>
                   <td>{new Date(e.timestamp).toLocaleString()}</td>
                 </tr>
               ))}
@@ -89,6 +163,135 @@ export function Dashboard() {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+export function CheckPage() {
+  const { id } = useParams<{ id: string }>();
+  const [check, setCheck] = useState<CheckRun | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!id) return;
+    const poll = setInterval(async () => {
+      try {
+        const c = await api.checks.get(id);
+        setCheck(c);
+        if (c.status === "completed" || c.status === "failed") clearInterval(poll);
+      } catch (e: any) {
+        setError(e.message);
+        clearInterval(poll);
+      }
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [id]);
+
+  if (error) return <div className="error">{error}</div>;
+  if (!check) return <div>Loading...</div>;
+
+  const counts = check.result?.severity_counts || {};
+  const risk = check.result?.risk_level;
+
+  return (
+    <div>
+      <h1>Check Run #{check.id}</h1>
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-label">Status</div>
+          <div className={`stat-value badge-${check.status}`}>{check.status}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Score</div>
+          <div className="stat-value">{check.result?.score ?? "pending"}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Risk</div>
+          <div className={`stat-value badge-${risk || "pending"}`}>{risk ?? "pending"}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Duration</div>
+          <div className="stat-value">
+            {check.start_time && check.end_time
+              ? `${Math.round((new Date(check.end_time).getTime() - new Date(check.start_time).getTime()) / 1000)}s`
+              : "running..."}
+            }
+          </div>
+        </div>
+      </div>
+
+      {check.error && <div className="error">{check.error}</div>}
+
+      {check.stages && check.stages.length > 0 && (
+        <div className="panel" style={{ marginBottom: 24, borderTop: "1px solid var(--border)" }}>
+          <h2>Pipeline stages</h2>
+          <table className="table">
+            <thead>
+              <tr><th>Stage</th><th>Status</th><th>Start</th><th>End</th><th>Error</th></tr>
+            </thead>
+            <tbody>
+              {check.stages.map((s) => (
+                <tr key={s.name}>
+                  <td className="mono">{s.name}</td>
+                  <td><span className={`badge badge-${s.status}`}>{s.status}</span></td>
+                  <td>{s.start_time ? new Date(s.start_time).toLocaleString() : "-"}</td>
+                  <td>{s.end_time ? new Date(s.end_time).toLocaleString() : "-"}</td>
+                  <td className="mono">{s.error || "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {check.result && (
+        <>
+          <div className="panel" style={{ marginBottom: 24 }}>
+            <h2>Summary</h2>
+            <p>{check.result.summary}</p>
+            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              {[...Array(5).keys()].map((i) => {
+                const sev = ["critical", "high", "medium", "low", "info"][i];
+                const count = counts[sev] || 0;
+                return count > 0 && (
+                  <span key={sev} className={`badge badge-${sev}`}>
+                    {sev}: {count}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="panel" style={{ marginBottom: 24 }}>
+            <h2>Findings ({check.result.findings?.length || 0})</h2>
+            <table className="table">
+              <thead>
+                <tr><th>Severity</th><th>Category</th><th>Description</th><th>File</th><th>CWE</th></tr>
+              </thead>
+              <tbody>
+                {check.result.findings?.map((f, i) => (
+                  <tr key={f.id || i}>
+                    <td><span className={`badge badge-${f.severity}`}>{f.severity}</span></td>
+                    <td>{f.category}</td>
+                    <td>{f.description}</td>
+                    <td className="mono">
+                      {f.file_path ? `${f.file_path.split(/[\\/]/).pop()}${f.line_start ? `:${f.line_start}` : ""}` : "-"}
+                    </td>
+                    <td>{f.cwe || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {check.result.sbom && (
+            <div className="panel">
+              <h2>Dependency manifests (SBOM)</h2>
+              <pre className="mono" style={{ overflowX: "auto" }}>{check.result.sbom}</pre>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

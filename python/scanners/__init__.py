@@ -10,6 +10,7 @@ from .scanner import (
     register_scanner,
     scan_all,
     scan_with,
+    run_bandit,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "register_scanner",
     "scan_all",
     "scan_with",
+    "run_bandit",
 ]

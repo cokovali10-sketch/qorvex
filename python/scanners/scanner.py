@@ -6,14 +6,20 @@ by the Qorvex Go orchestrator and stored in PostgreSQL.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
-from typing import List, Optional, Protocol
+import time
+from typing import Dict, List, Optional, Protocol
 
+# ---------------------------------------------------------------------------
+# Finding & Result types
+# ---------------------------------------------------------------------------
+
+import dataclasses
 
 @dataclasses.dataclass
 class Finding:
@@ -94,8 +100,11 @@ class SemgrepScanner:
         # Try semgrep; fall back to basic regex analysis
         try:
             result = self._run_semgrep(project_path)
-        except (FileNotFoundError, subprocess.CalledProcessError):
+            result.errors.append(None)  # no error
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
             result = self._run_basic(project_path)
+            if e is not None:
+                result.errors.append(str(e))
 
         elapsed = int((time.time() - start) * 1000)
         result.elapsed_ms = elapsed
@@ -134,17 +143,29 @@ class SemgrepScanner:
         findings = []
 
         patterns = [
+            # Secrets
             (r"(?i)password\s*=\s*['\"][^'\"]+['\"]", "high", "secret", "Hardcoded password", "CWE-259", "Use env vars or secret manager"),
             (r"(?i)(api[_-]?key|secret[_-]?key)\s*=\s*['\"][^'\"]+['\"]", "high", "secret", "Hardcoded API key", "CWE-798", "Move to .env or vault"),
-            (r"(?i)(SELECT|INSERT|UPDATE|DELETE).*FROM", "low", "quality", "Direct SQL query", "CWE-89", "Use parameterized queries"),
+            (r"(?i)aws_[a-z_]+?(?:access|secret|session)_key\s*=\s*['\"][^'\"]+['\"]", "critical", "secret", "AWS credential detected", "CWE-798", "Use IAM roles or secret manager"),
+            (r"\bAKIA[0-9A-Z]{16}\b", "critical", "secret", "AWS access key ID detected", "CWE-798", "Rotate the access key"),
+            (r"(?i)-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----", "critical", "secret", "Private key material detected", "CWE-324", "Rotate the key and update configurations"),
+            # Code quality / anti-patterns
+            (r"(?i)(SELECT|INSERT|UPDATE|DELETE)\s+FROM\s+\w+", "low", "quality", "Direct SQL query", "CWE-89", "Use parameterized queries or ORM"),
             (r"eval\s*\([^)]*\)", "high", "security", "Use of eval()", "CWE-95", "Avoid eval; use safer alternatives"),
-            (r"exec\s*\([^)]*\)", "high", "security", "Use of exec()", "CWE-78", "Avoid exec; restrict inputs"),
+            (r"exec\s*\([^)]*\)", "high", "security", "Use of exec()", "CWE-78", "Restrict inputs or use safer APIs"),
+            # License compliance
+            (r"#\s*license\s*:\s*([^\n]+)", "info", "license", "License header detected", None, "Check license compliance"),
         ]
 
+        # Walk files, skip noisy dirs
+        skip_dirs = {".git", ".hg", ".svn", "node_modules", "target", "dist", "build",
+                     ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "vendor"}
+
         for root, dirs, files in os.walk(path):
-            dirs[:] = [d for d in dirs if not d.startswith((".", "__pycache__", "node_modules", "vendor"))]
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
             for fname in files:
-                if fname.endswith((".py", ".js", ".ts", ".java", ".go", ".rs", ".cpp", ".c", ".php")):
+                ext = os.path.splitext(fname)[1]
+                if ext in {".py", ".js", ".ts", ".java", ".go", ".rs", ".cpp", ".c", ".php", ".rb", ".php"}:
                     fpath = os.path.join(root, fname)
                     try:
                         with open(fpath, "r", encoding="utf-8", errors="replace") as f:
@@ -191,15 +212,19 @@ class BaselineScanner:
         total_lines = 0
         languages: dict = {}
         errors: List[str] = []
+        frameworks: Dict[str, int] = {}
 
         if not os.path.isdir(project_path):
             return ScanResult(self.name, [], ["path not found"], 0)
 
+        skip_dirs = {".git", ".hg", ".svn", "node_modules", "target", "dist", "build",
+                     ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "vendor"}
+
         for root, dirs, files in os.walk(project_path):
-            dirs[:] = [d for d in dirs if not d.startswith((".", "__pycache__", "node_modules", "vendor"))]
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
             for fname in files:
                 ext = os.path.splitext(fname)[1]
-                if ext in {".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".cs", ".swift"}:
+                if ext in {".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".cs", ".swift", ".css", ".html"}:
                     fpath = os.path.join(root, fname)
                     try:
                         with open(fpath, "r", encoding="utf-8", errors="replace") as f:
@@ -207,6 +232,8 @@ class BaselineScanner:
                         total_files += 1
                         total_lines += lines
                         languages[ext] = languages.get(ext, 0) + 1
+                        # Detect simple framework signs
+                        self._detect_frameworks(fname, ext, frameworks)
                     except OSError:
                         errors.append(f"cannot read: {fpath}")
 
@@ -217,53 +244,34 @@ class BaselineScanner:
                 description=f"Large project: {total_files} source files, {total_lines} lines",
             ))
 
+        # Add framework info as findings
+        for fw, count in sorted(frameworks.items(), key=lambda x: -x[1]):
+            if count >= 3:  # only report frameworks detected in 3+ files
+                findings.append(Finding(
+                    severity="info",
+                    category="quality",
+                    description=f"Detected {fw} framework ({count} files)",
+                ))
+
         elapsed = int((time.time() - start) * 1000)
         return ScanResult(self.name, findings, errors, elapsed, total_files)
 
-
-# ---------------------------------------------------------------------------
-# Scanner registry and runner
-# ---------------------------------------------------------------------------
-
-_registry: dict = {
-    "semgrep": SemgrepScanner,
-    "baseline": BaselineScanner,
-}
-
-
-def register_scanner(name: str, scanner_cls):
-    """Register a custom scanner."""
-    _registry[name] = scanner_cls
-
-
-def get_scanner(name: str) -> Scanner:
-    """Get a scanner instance by name."""
-    if name not in _registry:
-        raise KeyError(f"unknown scanner: {name}. Available: {list(_registry.keys())}")
-    cls = _registry[name]
-    if isinstance(cls, type):
-        return cls()
-    return cls
-
-
-def scan_all(project_path: str) -> List[ScanResult]:
-    """Run all registered scanners against a project."""
-    results = []
-    for name in _registry:
-        try:
-            scanner = get_scanner(name)
-            results.append(scanner.scan(project_path))
-        except Exception as e:
-            results.append(ScanResult(
-                scanner_name=name,
-                findings=[],
-                errors=[str(e)],
-                elapsed_ms=0,
-            ))
-    return results
-
-
-def scan_with(name: str, project_path: str) -> ScanResult:
-    """Run a single named scanner."""
-    scanner = get_scanner(name)
-    return scanner.scan(project_path)
+    @staticmethod
+    def _detect_frameworks(filename: str, ext: str, frameworks: Dict[str, int]) -> None:
+        name = filename.lower()
+        if ext == ".py":
+            if "django" in name or "manage.py" in name:
+                frameworks["Django"] = frameworks.get("Django", 0) + 1
+            if "flask" in name:
+                frameworks["Flask"] = frameworks.get("Flask", 0) + 1
+            if "fastapi" in name:
+                frameworks["FastAPI"] = frameworks.get("FastAPI", 0) + 1
+            if "celery" in name:
+                frameworks["Celery"] = frameworks.get("Celery", 0) + 1
+        elif ext in {".js", ".ts"}:
+            if "react" in name.lower():
+                frameworks["React"] = frameworks.get("React", 0) + 1
+            if "vue" in name.lower():
+                frameworks["Vue"] = frameworks.get("Vue", 0) + 1
+            if "angular" in name.lower():
+                frameworks["Angular"] = frameworks.get("Angular", 0) + 1

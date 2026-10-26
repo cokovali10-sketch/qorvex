@@ -1,0 +1,27 @@
+services:
+  qorvex:
+    build: .
+    ports:
+      - "8420:8420"
+    environment:
+      - QORVEX_PORT=8420
+      - QORVEX_SECRET=qorvex-secret-dev-key-change-in-production
+    volumes:
+      - .:/qorvex:ro
+    working_dir: /qorvex
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=qorvex
+      - POSTGRES_PASSWORD=qorvex-secret
+      - POSTGRES_DB=qorvex
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:

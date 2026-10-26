@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -201,6 +203,7 @@ func appendAudit(s *store.Store, al *audit.Logger, entry *platform.AuditEntry) {
 	}
 }
 
+// calculateScore computes a score from 0 to 100 based on findings severity.
 func calculateScore(findings []platform.Finding) float64 {
 	if len(findings) == 0 {
 		return 100.0
@@ -296,3 +299,314 @@ func (o *Orchestrator) CreateProject(name, path string) (*platform.Project, erro
 	})
 	return p, nil
 }
+
+// resolveProjectRoot canonicalises a project path and fails fast if the path
+// is empty, missing, or not a directory.  Used in StartCheck to reject bad
+// project roots before a pipeline goroutine is launched.
+func resolveProjectRoot(p *platform.Project) (string, error) {
+	if p == nil {
+		return "", errors.New("project is nil")
+	}
+	if strings.TrimSpace(p.Path) == "" {
+		return "", errors.New("project path is empty")
+	}
+
+	abs, err := filepath.Abs(p.Path)
+	if err != nil {
+		return "", fmt.Errorf("resolve project path: %w", err)
+	}
+	abs = filepath.Clean(abs)
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("project path is not accessible: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("project path is not a directory: %s", abs)
+	}
+
+	// Resolve symlinks on the root itself so containment checks compare
+	// real paths.
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve project symlinks: %w", err)
+	}
+	return filepath.Clean(real), nil
+}
+
+// ---------------------------------------------------------------------------
+// Stage implementations (stubs — each stage must bound its own I/O)
+
+// StageDiffReady verifies that the project is readable and records the VCS
+// state so later stages know whether diff-scoped checks are possible.
+func StageDiffReady(ctx *StageContext) ([]platform.Finding, error) {
+	_, root, err := projectFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx.Meta["project_root"] = root
+
+	gitDir := filepath.Join(root, ".git")
+	if !dirExists(gitDir) && !fileExists(gitDir) {
+		return []platform.Finding{
+			infoFinding(ctx, "diff", "no git repository detected; verification runs against the full tree"),
+		}, nil
+	}
+
+	res := runCommand(ctx.commandTimeout(10*time.Second), root, "git", "status", "--porcelain")
+	if res.Err != nil {
+		return []platform.Finding{
+			infoFinding(ctx, "diff", "git repository detected; working tree status unavailable"),
+		}, nil
+	}
+
+	changed := countNonEmptyLines(res.Stdout)
+	return []platform.Finding{
+		infoFinding(ctx, "diff", fmt.Sprintf("git repository detected; %d changed path(s) in the working tree", changed)),
+	}, nil
+}
+
+// StageStructureCheck walks the tree under strict bounds and flags files that
+// are unsafe to analyse, such as symlinks escaping the project root.
+func StageStructureCheck(ctx *StageContext) ([]platform.Finding, error) {
+	_, root, err := projectFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	files, truncated, err := walkProject(root, maxScanFiles)
+	if err != nil {
+		return nil, fmt.Errorf("walk project: %w", err)
+	}
+	ctx.Meta["files"] = files
+	ctx.Meta["files_truncated"] = truncated
+
+	var findings []platform.Finding
+	for _, f := range files {
+		if f.Mode&os.ModeSymlink != 0 {
+			target, linkErr := filepath.EvalSymlinks(f.Abs)
+			if linkErr != nil || !isWithin(root, target) {
+				findings = append(findings, platform.Finding{
+					ProjectID:   ctx.Run.ProjectID,
+					CheckRunID:  ctx.Run.ID,
+					Severity:    "high",
+					Category:    "security",
+					Description: fmt.Sprintf("symlink escapes project root: %s", f.Rel),
+					FilePath:    f.Rel,
+					RuleID:      "structure-symlink-escape",
+				})
+			}
+		}
+		if f.Size > 10<<20 {
+			findings = append(findings, platform.Finding{
+				ProjectID:   ctx.Run.ProjectID,
+				CheckRunID:  ctx.Run.ID,
+				Severity:    "low",
+				Category:    "quality",
+				Description: fmt.Sprintf("oversized file (%d bytes) skipped by content scanners", f.Size),
+				FilePath:    f.Rel,
+				RuleID:      "structure-large-file",
+			})
+		}
+	}
+
+	if truncated {
+		findings = append(findings, platform.Finding{
+			ProjectID:   ctx.Run.ProjectID,
+			CheckRunID:  ctx.Run.ID,
+			Severity:    "medium",
+			Category:    "quality",
+			Description: fmt.Sprintf("file limit reached (%d); scan results cover a subset of the tree", maxScanFiles),
+			RuleID:      "structure-truncated",
+		})
+	}
+
+	findings = append(findings, infoFinding(ctx, "structure", fmt.Sprintf("inspected %d file(s)", len(files))))
+	return findings, nil
+}
+
+// StageStaticAnalysis prefers Forge for project-wide analysis and falls back
+// to the bundled Python scanner when Forge is not installed.
+func StageStaticAnalysis(ctx *StageContext) ([]platform.Finding, error) {
+	_, root, err := projectFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if fc := forge.DefaultForgeClient(); fc.Ping() {
+		result, auditErr := fc.Audit(root)
+		if auditErr == nil && result != nil {
+			ctx.Meta["static_engine"] = "forge"
+			findings := forgeFindings(result, ctx.Run.ProjectID, ctx.Run.ID)
+			if len(findings) == 0 {
+				findings = append(findings, infoFinding(ctx, "sast", "forge audit completed with no findings"))
+			}
+			return findings, nil
+		}
+	}
+
+	findings, scanErr := scanWithPython(ctx, root)
+	if scanErr == nil {
+		ctx.Meta["static_engine"] = "python"
+		if len(findings) == 0 {
+			findings = append(findings, infoFinding(ctx, "sast", "python scanner completed with no findings"))
+		}
+		return findings, nil
+	}
+
+	ctx.Meta["static_engine"] = "none"
+	return []platform.Finding{
+		infoFinding(ctx, "sast", fmt.Sprintf("static analysis skipped: forge and python scanner unavailable (%v)", scanErr)),
+	}, nil
+}
+
+// forgeFindings converts a Forge audit into platform findings exactly once.
+func forgeFindings(result *forge.ForgeScanResult, projectID, checkRunID string) []platform.Finding {
+	findings := make([]platform.Finding, 0, len(result.Findings)+len(result.Top))
+	for _, f := range result.Findings {
+		findings = append(findings, platform.Finding{
+			ProjectID:   projectID,
+			CheckRunID:  checkRunID,
+			Severity:    mapSeverity(f.Severity),
+			Category:    "forge-" + f.Category,
+			Description: f.Description,
+			FilePath:    f.FilePath,
+			LineStart:   f.LineStart,
+			LineEnd:     f.LineEnd,
+			RuleID:      "forge-" + f.Category,
+		})
+	}
+	for _, top := range result.Top {
+		findings = append(findings, platform.Finding{
+			ProjectID:   projectID,
+			CheckRunID:  checkRunID,
+			Severity:    inferSeverityFromTop(top),
+			Category:    "forge-top",
+			Description: top,
+			RuleID:      "forge-top",
+		})
+	}
+	return findings
+}
+
+func mapSeverity(forgeSev string) string {
+	switch strings.ToLower(forgeSev) {
+	case "critical":
+		return "critical"
+	case "high":
+		return "high"
+	case "medium", "moderate":
+		return "medium"
+	case "low":
+		return "low"
+	default:
+		return "low"
+	}
+}
+
+func inferSeverityFromTop(top string) string {
+	if top == "" {
+		return "low"
+	}
+	first := strings.ToLower(strings.TrimSpace(strings.SplitN(top, ":", 2)[0]))
+	switch {
+	case strings.Contains(first, "critical"):
+		return "critical"
+	case strings.Contains(first, "high"):
+		return "high"
+	case strings.Contains(first, "medium"), strings.Contains(first, "moderate"):
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// StageDependencyScan runs whichever dependency auditors are installed and
+// reports vulnerabilities with a stable severity mapping.
+func StageDependencyScan(ctx *StageContext) ([]platform.Finding, error) {
+	_, root, err := projectFromCtx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	manifests := detectManifests(root)
+	ctx.Meta["manifests"] = manifests
+	if len(manifests) == 0 {
+		return []platform.Finding{
+			infoFinding(ctx, "dependency", "no dependency manifests detected"),
+		}, nil
+	}
+
+	kinds := map[string]bool{}
+	for _, m := range manifests {
+		kinds[m.Kind] = true
+	}
+
+	var findings []platform.Finding
+	var ran, skipped []string
+
+	if kinds["go"] && toolAvailable("govulncheck") {
+		res := runCommand(ctx.commandTimeout(90*time.Second), root, "govulncheck", "./...")
+		if res.Err == nil {
+			findings = append(findings, parseGovulncheck(res.Stdout, ctx)...)
+			ran = append(ran, "govulncheck")
+		} else {
+			skipped = append(skipped, "govulncheck (failed)")
+		}
+	} else if kinds["go"] {
+		skipped = append(skipped, "govulncheck (not installed)")
+	}
+
+	if kinds["npm"] && fileExists(filepath.Join(root, "package-lock.json")) && toolAvailable("npm") {
+		res := runCommand(ctx.commandTimeout(90*time.Second), root, "npm", "audit", "--json", "--audit-level=low")
+		if strings.TrimSpace(res.Stdout) != "" {
+			if parsed, ok := parseNpmAudit(res.Stdout, ctx); ok {
+				findings = append(findings, parsed...)
+				ran = append(ran, "npm audit")
+			} else {
+				skipped = append(skipped, "npm audit (unparsable)")
+			}
+		} else {
+			skipped = append(skipped, "npm audit (failed)")
+		}
+	} else if kinds["npm"] {
+		skipped = append(skipped, "npm audit (lockfile or npm missing)")
+	}
+
+	if kinds["python"] && fileExists(filepath.Join(root, "requirements.txt")) && toolAvailable("pip-audit") {
+		res := runCommand(ctx.commandTimeout(90*time.Second), root, "pip-audit", "-r", "requirements.txt", "-f", "json")
+		if parsed, ok := parsePipAudit(res.Stdout, ctx); ok {
+			findings = append(findings, parsed...)
+			ran = append(ran, "pip-audit")
+		} else {
+			skipped = append(skipped, "pip-audit (failed)")
+		}
+	} else if kinds["python"] {
+		skipped = append(skipped, "pip-audit (not installed or no requirements.txt)")
+	}
+
+	if kinds["rust"] && toolAvailable("cargo") {
+		res := runCommand(ctx.commandTimeout(90*time.Second), root, "cargo", "audit", "--json")
+		if parsed, ok := parseCargoAudit(res.Stdout, ctx); ok {
+			findings = append(findings, parsed...)
+			ran = append(ran, "cargo audit")
+		} else {
+			skipped = append(skipped, "cargo audit (not installed)")
+		}
+	} else if kinds["rust"] {
+		skipped = append(skipped, "cargo audit (cargo missing)")
+	}
+
+	summary := fmt.Sprintf("dependency scan: %d manifest(s)", len(manifests))
+	if len(ran) > 0 {
+		summary += "; ran: " + strings.Join(ran, ", ")
+	}
+	if len(skipped) > 0 {
+		summary += "; skipped: " + strings.Join(skipped, ", ")
+	}
+	findings = append(findings, infoFinding(ctx, "dependency", summary))
+	return findings, nil
+}
+
+// ... (remaining stage implementations continue as before)
