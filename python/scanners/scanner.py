@@ -274,3 +274,81 @@ class BaselineScanner:
                 frameworks["Vue"] = frameworks.get("Vue", 0) + 1
             if "angular" in name.lower():
                 frameworks["Angular"] = frameworks.get("Angular", 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# Scanner registry (used by CLI and package init)
+# ---------------------------------------------------------------------------
+
+_registry: dict[str, type] = {}
+
+
+def register_scanner(name: str, cls: type):
+    """Register a scanner by name."""
+    _registry[name] = cls
+
+
+def get_scanner(name: str) -> type:
+    """Get scanner class by name."""
+    if name not in _registry:
+        raise KeyError(f"Scanner '{name}' not registered")
+    return _registry[name]
+
+
+def scan_all(project_path: str) -> list[ScanResult]:
+    """Run all registered scanners against a project."""
+    results: list[ScanResult] = []
+    for name, cls in _registry.items():
+        try:
+            scanner = cls()
+            results.append(scanner.scan(project_path))
+        except Exception as exc:
+            results.append(ScanResult(
+                scanner_name=name,
+                findings=[],
+                errors=[str(exc)],
+                elapsed_ms=0,
+            ))
+    return results
+
+
+def scan_with(project_path: str, scanner_name: str) -> ScanResult:
+    """Run a specific scanner."""
+    scanner_cls = get_scanner(scanner_name)
+    scanner = scanner_cls()
+    return scanner.scan(project_path)
+
+
+# ---------------------------------------------------------------------------
+# Bandit scanner integration
+# ---------------------------------------------------------------------------
+
+def run_bandit(project_path: str, timeout: int = 120) -> List[Finding]:
+    """Run bandit security scanner and return findings.
+
+    Returns an empty list if bandit is not installed or errors occur.
+    """
+    try:
+        cmd = ["bandit", "-r", project_path, "--format", "json", "--quiet"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode not in (0, 1):  # bandit exits 1 when findings are found
+            return []
+
+        data = json.loads(proc.stdout)
+        findings = []
+        for item in data:
+            severity_map = {"LOW": "low", "MEDIUM": "medium", "HIGH": "high"}
+            sev = severity_map.get(item.get("issue_severity", "LOW"), "low")
+            findings.append(Finding(
+                severity=sev,
+                category="security",
+                description=item.get("issue_text", "bandit finding"),
+                file_path=item.get("filename"),
+                line_start=item.get("line_number"),
+                cwe=item.get("cwe"),
+                remediation=item.get("mitigation", ""),
+                rule_id=item.get("test_id"),
+            ))
+        return findings
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return []

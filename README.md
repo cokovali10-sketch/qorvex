@@ -1,201 +1,172 @@
-# ◈ Qorvex — AI Code Verification Platform
+╔════════════════════════════════════════════════════════════════════╗
+║  ◈◆◇  Q O R V E X  —  AI Code Verification Platform  ◇◆◈         ║
+║     Build · Verify · Audit · Secure · Fail-Closed                ║
+╠════════════════════════════════════════════════════════════════════╣
+║  EN: AI code verification with isolated sandbox, secret scan,    ║
+║  dependency audit, HMAC audit log, 9-stage pipeline.              ║
+║  RU: Проверка AI-кода с изолированным sandbox, сканером секретов,║
+║  аудитом зависимостей, HMAC-логом, 9-этапным пайплайном.         ║
+╚════════════════════════════════════════════════════════════════════╝
 
-**Build. Test. Verify.**
+# ◈ Qorvex — AI Code Verification Platform / Платформа проверки AI-кода
 
-Платформа для безопасной проверки и аудита кода, создаваемого AI coding agents.
-Fail-closed пайплайн, встроенный сканер секретов, dependency-аудит, изолированное
-выполнение и неизменяемый HMAC-подписанный аудит.
+> **Build. Test. Verify. — Безопасная проверка кода от AI-агентов.**
 
 ```
-Go core · Rust sandbox · Python analyzers · TypeScript dashboard · PostgreSQL
+                    ┌─────────────────────────────┐
+                    │     QORVEX PLATFORM         │
+                    │     v0.3.0  ·  2026        │
+      ┌─────────────┼─────────────────────────────┼─────────────┐
+      │  Go Core    │  Rust Sandbox              │  Python     │
+      │  Pipeline   │  seccomp + namespaces      │  Scanners   │
+      │  Policy     │  cgroups v2                │  semgrep    │
+      │  HMAC Audit │  Job Objects (Win)         │  bandit     │
+      └─────────────┼─────────────────────────────┼─────────────┘
+                    │     TypeScript Dashboard   │
+                    │     React + JWT Auth       │
+                    │     6 Pages + Login        │
+                    └─────────────────────────────┘
+                            PostgreSQL DB
 ```
 
-## 🚀 Быстрый старт
+---
+
+## 🇬🇧 English / 🇷🇺 Русский
+
+---
+
+### 🚀 Quick Start / Быстрый старт
 
 ```bash
 git clone https://github.com/cokovali10-sketch/qorvex.git
 cd qorvex
-
-# Запустить API-сервер (порт 8420)
 go run ./cmd/qorvex
-
-# Или собрать бинарник
-go build -o qorvex.exe ./cmd/qorvex
-./qorvex.exe
+# Open http://localhost:8420
+# Login: admin / admin123 (default / по умолчанию)
 ```
 
-Порт можно переопределить: `QORVEX_PORT=9000 go run ./cmd/qorvex`.
+### 🏗️ Architecture / Архитектура
 
-### Первая проверка через API
+| Language / Язык | Component / Компонент | Purpose / Назначение |
+|-----------------|----------------------|----------------------|
+| Go | Core API / Pipeline / Policy / Audit / Store | 9-stage verification with telemetry |
+| Rust | Execution Engine / Sandbox | seccomp-bpf + user namespaces + cgroups v2 (Linux); Job Objects (Win) |
+| Python | Code Analysis / Secret Scan / Dependency Audit | semgrep + regex fallback + bandit |
+| TypeScript | Web Dashboard (React + Vite) | 6 pages: Dashboard, Projects, CheckDetail, Policies, AuditLog, Login |
+| SQL (PostgreSQL) | Migrations / Telemetry | `check_stages`, `risk_level`, `severity_counts`, HMAC audit |
+
+### 🔬 Verification Pipeline / Пайплайн проверки (9 stages / 9 стадий)
+
+| # | Stage / Стадия | Critical? / Критично? | What it does / Что делает |
+|---|----------------|----------------------|---------------------------|
+| 1 | `diff_ready` | ✅ | VCS state / состояние репозитория |
+| 2 | `structure_check` | ✅ | Bounded tree walk, symlink escape / обход дерева, symlink |
+| 3 | `static_analysis` | — | Forge audit → Python scanner fallback |
+| 4 | `dependency_scan` | — | govulncheck / npm audit / pip-audit / cargo audit |
+| 5 | `secret_scan` | ✅ | AWS / GitHub / Slack / Google keys, private keys, generic credentials |
+| 6 | `build_and_test` | — | `go build`, `cargo check`, `npm run build`, `compileall` |
+| 7 | `sandbox_run` | — | Run `.qorvex/sandbox.json` in Rust sandbox |
+| 8 | `risk_assessment` | ✅ | Severity aggregation → low / medium / high / critical |
+| 9 | `report_generation` | ✅ | Score, counts, SBOM manifests, summary |
+
+**Fail-closed rules / Правила fail-closed:**
+- Critical stage error → check `failed` / ошибка критической стадии → `failed`
+- `risk_level=critical` → `failed` regardless of score / критический риск → `failed` всегда
+- Path traversal blocked / `..` и абсолютные пути запрещены
+- Resource bounds: 5000 files, depth ≤64, file ≤1 MiB, output ≤64 KiB / 1MB trimmed
+
+---
+
+## 🔒 Security / Безопасность
+
+- **Fail-closed** — never skip a critical failure / никогда не пропускать критическую ошибку
+- **Deny-by-default** — minimal sandbox privileges / минимальные привилегии sandbox
+- **Immutable audit** — HMAC-SHA256 per event / неизменяемый HMAC-подписанный лог
+- **Path safety** — canonical root, no absolute / `..` paths / канонизация root
+- **Resource bounds** — file/size/depth/time limits / лимиты файлов/размера/глубины/времени
+- **Secrets hygiene** — secrets not logged / секреты не логируются; only file + line in findings
+
+---
+
+## 📊 Scale / Масштаб
+
+| Layer / Слой | Files / Файлов | Lines / Строк |
+|-------------|----------------|---------------|
+| Go (core + tests) | 18 | 4 597 |
+| Rust (sandbox) | 1 | 191 |
+| Python (scanners + tests) | 4 | 492 |
+| TypeScript (dashboard) | 10 | 741 |
+| SQL (migrations) | 2 | 136 |
+| **Code total / Код всего** | **35** | **6 157** |
+| Docs / Документация | 8 | 653 |
+| Config (no lockfile) / Конфиг | 9 | 184 |
+| **Author total / Авторский итог** | **52** | **6 994** |
+
+`package-lock.json` (2 627 lines) excluded / не входит в авторский масштаб.
+
+---
+
+## 🧪 Testing / Тестирование
 
 ```bash
-# 1. Создать проект
-curl -X POST http://localhost:8420/api/v1/projects \
-  -H "Content-Type: application/json" \
-  -d '{"name":"demo","path":"D:/Projects/demo"}'
+# Go — 106 test functions / функций
+# 7 packages / пакетов — all passing / все проходят
+go test ./pkg/... -count=1 -race
 
-# 2. Запустить проверку (подставьте id проекта)
-curl -X POST http://localhost:8420/api/v1/projects/<project-id>/checks
+# Python — 9 tests / тестов
+cd python && python -m pytest tests -q
 
-# 3. Смотреть статус, стадии и отчёт
-curl http://localhost:8420/api/v1/checks/<check-id>
+# Rust
+cargo test --manifest-path rust/Cargo.toml 2>/dev/null || echo "Rust sandbox requires Linux/Win build env"
+
+# TypeScript / Dashboard
+cd ts && npm run build && npm test
 ```
 
-## 🏗️ Архитектура
+---
 
-```
-Qorvex Platform
-├── Go (Core)          — API, оркестрация, pipeline, policy, audit, store
-├── Rust               — Execution Engine (sandbox, seccomp, namespaces, rlimits)
-├── Python             — Анализаторы кода (semgrep + regex fallback, baseline)
-├── TypeScript         — Web dashboard (React + Vite, 6 страниц)
-└── SQL (PostgreSQL)   — Проекты, проверки, стадии, findings, политики, аудит
-```
-
-### Ключевые компоненты
-
-| Компонент | Язык | Назначение |
-|-----------|------|-----------|
-| **Execution Engine** | Rust | Изолированное выполнение недоверенного кода (seccomp + namespaces + rlimits) |
-| **Code Analysis Engine** | Python | SAST, секреты, зависимости, качество кода |
-| **Verification Pipeline** | Go | 9 стадий с таймаутами, телеметрией и fail-closed семантикой |
-| **Policy Engine** | Go | Декларативные правила `block` / `warn` / `allow` |
-| **Audit Log** | Go | Неизменяемый HMAC-SHA256-подписанный лог |
-| **Dashboard** | TypeScript | React SPA: проекты, проверки, стадии, findings, политики, аудит |
-| **Forge Integration** | Go + Python | Адаптер к Forge AI Toolkit (72 инструмента) |
-
-## 🔬 Verification Pipeline
-
-Каждая проверка проходит 9 стадий. Статус, длительность и ошибка каждой стадии
-сохраняются в `check_run.stages`.
-
-| # | Стадия | Что делает | Critical |
-|---|--------|-----------|----------|
-| 1 | `diff_ready` | Проверяет доступность проекта, определяет VCS-состояние | ✅ |
-| 2 | `structure_check` | Bounded-обход дерева, symlink escape, oversized-файлы | ✅ |
-| 3 | `static_analysis` | Forge audit → fallback на Python-сканер | — |
-| 4 | `dependency_scan` | govulncheck / npm audit / pip-audit / cargo audit | — |
-| 5 | `secret_scan` | AWS/GitHub/Slack/Google ключи, private keys, JWT, generic credentials | ✅ |
-| 6 | `build_and_test` | `go build`, `cargo check`, `npm run build`, `python compileall` | — |
-| 7 | `sandbox_run` | Команда из `.qorvex/sandbox.json` в Rust-sandbox (если собран) | — |
-| 8 | `risk_assessment` | Агрегирует severity → `low/medium/high/critical` | ✅ |
-| 9 | `report_generation` | Формирует score, counts, SBOM-манифесты, summary | ✅ |
-
-**Правила безопасности пайплайна:**
-
-- путь проекта канонизируется, любой выход за root запрещён (`safeJoin`);
-- обход ограничен 5000 файлами, глубиной 64 и файлами ≤ 1 MiB;
-- внешние команды запускаются без shell, с таймаутом и лимитом вывода 64 KiB;
-- секреты в placeholder-значениях (`changeme`, `your_...`) не считаются утечкой;
-- критическая стадия с ошибкой → весь check `failed`;
-- `risk_level=critical` → check `failed` даже при высоком score;
-- все стадии пишут события в подписанный audit log.
-
-## 📊 API
-
-| Метод | Путь | Назначение |
-|-------|------|-----------|
-| GET | `/api/v1/health` | Проверка сервера |
-| GET | `/api/v1/projects` | Список проектов |
-| POST | `/api/v1/projects` | Создать проект |
-| GET | `/api/v1/projects/{id}` | Детали проекта |
-| POST | `/api/v1/projects/{id}/checks` | Запустить проверку |
-| GET | `/api/v1/checks/{id}` | Статус, стадии и отчёт |
-| GET | `/api/v1/projects/{id}/checks` | История проверок |
-| GET | `/api/v1/projects/{id}/findings` | Findings проекта |
-| GET | `/api/v1/policies` | Список политик |
-| POST | `/api/v1/policies` | Создать/обновить политику |
-| GET | `/api/v1/policies/{id}` | Политика по id |
-| GET | `/api/v1/audit` | Последние записи аудита |
-| GET | `/api/v1/audit/verify` | Проверка HMAC-подписей |
-| GET | `/api/v1/audit/stats` | Статистика аудита |
-
-## 🐘 База данных
+## 🐘 Database / База данных
 
 ```bash
 psql -U qorvex -d qorvex -f sql/migrations/001_initial_schema.sql
 psql -U qorvex -d qorvex -f sql/migrations/002_pipeline_telemetry.sql
 ```
 
-`002` добавляет `check_stages`, `risk_level`, `severity_counts` и ослабляет
-CHECK категорий для namespaced-значений (`forge-security`, `stage-error:*`).
+`002` adds telemetry: `check_stages`, `risk_level`, `severity_counts`, relaxed CHECK for namespaced values (`forge-security`, `stage-error:*`).
 
-## 🧪 Тестирование
+---
 
-```bash
-# Go — 106 тестовых функций, 7 пакетов
-go test ./pkg/... -count=1 -v
+## 🔗 Forge Integration / Интеграция с Forge
 
-# Python — 9 тестов
-cd python && python -m pytest tests -q
-
-# Rust
-cargo test --manifest-path rust/Cargo.toml
-
-# TypeScript
-cd ts && npm run build && npm test
-```
-
-Покрытые области: path traversal, bounded walk, таймауты команд, детекция
-секретов и placeholder-фильтрация, парсеры npm/pip/cargo/govulncheck,
-риск-модель, отчёт, API-контракты, HMAC-аудит, fail-closed пайплайн,
-copy-on-read в store (защита от гонок).
-
-## 🔒 Безопасность
-
-- **Fail-closed** — ошибка критической стадии = `failed`, а не «пропущено».
-- **Deny-by-default** — sandbox с минимальными привилегиями и rlimits.
-- **Immutable audit** — HMAC-SHA256 по каждому событию, `/audit/verify`.
-- **Path safety** — канонизация root, запрет absolute/`..` путей, symlink escape.
-- **Resource bounds** — лимиты файлов, размера, глубины, времени и вывода команд.
-- **Secrets hygiene** — ключи не логируются, в finding попадает только файл и строка.
-
-## 🔗 Интеграция с Forge
-
-Qorvex использует [Forge AI Toolkit](https://github.com/cokovali10-sketch/forge-ai-toolkit)
-(72 инструмента). Адаптер: `pkg/forge/client.go`. Если Forge недоступен,
-`static_analysis` автоматически переключается на Python-сканер.
+Uses [Forge AI Toolkit](https://github.com/cokovali10-sketch/forge-ai-toolkit) (72 tools / инструментов). Adapter: `pkg/forge/client.go`. If unavailable / недоступен, `static_analysis` falls back to Python scanner / автоматически переключается на Python-сканер.
 
 ```json
 {
   "mcpServers": {
-    "qorvex": {
-      "command": "qorvex",
-      "args": ["mcp"]
-    },
-    "forge": {
-      "command": "D:/Forge-Factority/.venv/Scripts/python.exe",
-      "args": ["-m", "forge.cli", "mcp"]
-    }
+    "qorvex": { "command": "qorvex", "args": ["mcp"] },
+    "forge": { "command": "D:/Forge-Factority/.venv/Scripts/python.exe", "args": ["-m", "forge.cli", "mcp"] }
   }
 }
 ```
 
-## 🗺️ Roadmap
+---
 
-См. [docs/ROADMAP.md](docs/ROADMAP.md). Текущий статус — v0.2.0:
-реальный pipeline, телеметрия стадий, dependency-аудит и риск-модель.
+## 🌐 Bilingual / Двуязычный
 
-## 📏 Масштаб
+All docs in `docs/` support EN/RU. The dashboard supports both locales via `lang` attribute. API returns bilingual error messages when `Accept-Language` header is provided.
 
-| Слой | Файлов | Строк |
-|------|--------|-------|
-| Go (core + tests) | 18 | 4 597 |
-| Rust (sandbox) | 1 | 191 |
-| Python (scanners + tests) | 4 | 492 |
-| TypeScript (dashboard) | 10 | 741 |
-| SQL (миграции) | 2 | 136 |
-| **Код всего** | **35** | **6 157** |
-| Документация | 8 | 653 |
-| Конфигурация (без lockfile) | 9 | 184 |
-| **Авторский итог** | **52** | **6 994** |
+---
 
-`package-lock.json` (2 627 строк) не входит в авторский масштаб.
+## 📄 License / Лицензия
 
-## 📄 Лицензия
+MIT — see [LICENSE](LICENSE) / см. [LICENSE](LICENSE).
 
-MIT — см. [LICENSE](LICENSE).
+---
 
-## 👤 Автор
+## 👤 Author / Автор
 
 **cokovali10-sketch**
+
+Repo / Репозиторий: `https://github.com/cokovali10-sketch/qorvex`
+Commit / Коммит: `ca84eae` (v0.3.0)
+Status / Статус: All priorities done / Все приоритеты выполнены
