@@ -15,6 +15,7 @@ import tempfile
 import time
 from typing import Dict, List, Optional, Protocol
 
+
 # ---------------------------------------------------------------------------
 # Finding & Result types
 # ---------------------------------------------------------------------------
@@ -100,11 +101,9 @@ class SemgrepScanner:
         # Try semgrep; fall back to basic regex analysis
         try:
             result = self._run_semgrep(project_path)
-            result.errors.append(None)  # no error
         except (FileNotFoundError, subprocess.CalledProcessError) as e:
             result = self._run_basic(project_path)
-            if e is not None:
-                result.errors.append(str(e))
+            result.errors.append(str(e))
 
         elapsed = int((time.time() - start) * 1000)
         result.elapsed_ms = elapsed

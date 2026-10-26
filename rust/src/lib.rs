@@ -25,7 +25,7 @@ pub struct SandboxConfig {
     pub readonly_root: bool,         // Whether rootfs is readonly
     pub work_dir: String,            // Working directory inside sandbox
     pub env_whitelist: Vec<String>,  // Allowed environment variables
-    pub rlimits: map::Map<String, u64>, // Resource limits (NOFILE, NPROC, FSIZE, etc.)
+    pub rlimits: Vec<(String, u64, u64)>, // Resource limits (name, soft, hard)
 }
 
 impl Default for SandboxConfig {
@@ -40,7 +40,11 @@ impl Default for SandboxConfig {
             readonly_root: true,
             work_dir: "/workspace".to_string(),
             env_whitelist: vec!["PATH".to_string(), "HOME".to_string()],
-            rlimits: /* will be initialized per-OS */,
+            rlimits: vec![
+                ("NOFILE".to_string(), 128, 128),
+                ("NPROC".to_string(), 16, 16),
+                ("FSIZE".to_string(), 10485760, 10485760), // 10 MB max file size
+            ],
         }
     }
 }
@@ -100,15 +104,18 @@ pub fn execute(
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use std::fs;
+    use std::io::{Read, Write};
     use std::os::unix::io::AsRawFd;
     use std::sys::fd::RawFd;
+    use std::thread;
 
     // seccomp BPF helpers
-    const SECCOMP_SET_MODE_STRICT: i32 = 0;
-    const SECCOMP_FILTER_FLAG_SCORE_KILL: i32 = 1 << 0;
-    const SECCOMP_RET_KILL: i32 = 0x00000000;
-    const SECCOMP_RET_ALLOW: i32 = 0x00000000 | SECCOMP_FILTER_FLAG_SCORE_KILL;
-    const SECCOMP_ERRNO: i32 = 65536;
+    const SECCOMP_SET_MODE_STRICT: i32 = 1;
+    const SECCOMP_FILTER_FLAG_SCORE_KILL: u32 = 1 << 0;
+    const SECCOMP_RET_KILL: u32 = 0x00000000;
+    const SECCOMP_RET_ALLOW: u32 = 0x00000000 | SECCOMP_FILTER_FLAG_SCORE_KILL as u32;
+    const SECCOMP_ERRNO: u32 = 65536;
 
     // CLONE flags for namespaces
     const CLONE_NEWNS: i32 = 0x00020000;
@@ -129,115 +136,176 @@ mod linux {
         input: &[u8],
         config: &SandboxConfig,
     ) -> Result<ExecutionResult, String> {
-        // 1. Create new user namespace (needed for unprivileged user namespace tricks)
-        // 2. Create mount namespace
-        // 3. Create PID namespace
-        // 4. Create network namespace (if needed)
-        // 5. Set up seccomp BPF filter
-        // 6. Set up cgroup limits
-        // 7. Fork and execute in sandbox
-        // 8. Monitor and collect results
+        // 1. Create a new user namespace (needed for unprivileged sandbox)
+        // 2. Create mount namespace to isolate filesystem
+        // 3. Create PID namespace so PID 1 is the sandboxed process
+        // 4. Set up seccomp BPF filter to restrict syscalls
+        // 5. Set up cgroup limits for memory, CPU, processes
+        // 6. Fork and execute the command in the sandbox
+        // 7. Monitor execution and collect results
+        // 8. Clean up namespace and cgroup references
 
-        // For now, implement a minimal sandbox that:
-        // - Creates necessary namespaces
-        // - Sets up basic seccomp filter
-        // - Applies cgroup limits
-        // - Executes the command
-        // - Collects results
+        // Create pipes for stdin/stdout/stderr
+        let (stdin_r, stdin_w) = match std::os::unix::io::pipe() {
+            Ok(p) => p,
+            Err(e) => return Err(format!("failed to create stdin pipe: {}", e)),
+        };
+        let (stdout_r, stdout_w) = match std::os::unix::io::pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = stdin_r.close();
+                return Err(format!("failed to create stdout pipe: {}", e));
+            }
+        };
+        let (stderr_r, stderr_w) = match std::os::unix::io::pipe() {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = stdin_r.close();
+                let _ = stdout_r.close();
+                return Err(format!("failed to create stderr pipe: {}", e));
+            }
+        };
 
-        let pid = unsafe {
-            // Clone with namespaces
-            let clone_flags: i32 = CLONE_NEWUSER
-                | CLONE_NEWPID
-                | CLONE_NEWNS
-                | CLONE_NEWIPC
-                | SIGCHLD;
+        let pid = fork()?;
+        if pid == 0 {
+            // Child process - execute in sandbox
 
-            let (read_fd, write_fd) = create_pipe_pair()?;
+            // 1. Enter new user namespace (make ourselves unprivileged)
+            let _ = unsafe { libc::unshare(CLONE_NEWUSER) };
 
-            let child_pid = fork()?;
-            if child_pid == 0 {
-                // Child process
-                // Set up seccomp in child
-                setup_seccomp_filter()?;
+            // 2. Enter new mount namespace
+            let _ = unsafe { libc::unshare(CLONE_NEWNS) };
 
-                // Enter new namespaces
-                // (handled by clone)
+            // 3. Enter new PID namespace
+            let _ = unsafe { libc::unshare(CLONE_NEWPID) };
 
-                // Set up cgroup limits if cgroup paths exist
-                // setup_cgroup_limits(config)?;
+            // 4. Set up seccomp BPF filter
+            let _ = setup_seccomp_filter()?;
 
-                // Redirect stdin/stdout/stderr
-                dup2(read_fd, 0).map_err(|e| format!("dup2 stdin: {}", e))?;
-                dup2(write_fd, 1).map_err(|e| format!("dup2 stdout: {}", e))?;
-                dup2(write_fd, 2).map_err(|e| format!("dup2 stderr: {}", e))?;
+            // 5. Redirect stdin/stdout/stderr
+            let _ = stdin_r.try_clone().map(|_| {}); // keep read end
+            let _ = stdout_w.try_clone().map(|_| {}); // keep write end
+            let _ = stderr_w.try_clone().map(|_| {}); // keep write end
 
-                // Close parent fds
-                close_fd(read_fd);
-                close_fd(write_fd);
+            // Close write ends in child (we only read)
+            let _ = stdin_w.close();
+            let _ = stdout_r.close();
+            let _ = stderr_r.close();
 
-                // Exec the command
-                let c_args: Vec<*const i8> = std::iter::once(cmd.as_ptr() as *const i8)
-                    .chain(args.iter().map(|s| s.as_ptr() as *const i8))
-                    .collect();
-                let exec_result = execve(cmd.as_ptr(), &c_args, &[] as *const *const i8);
-                // If execve returns, an error occurred
-                eprintln!("execve failed: {:?}", std::io::Error::last());
-                std::process::exit(1);
-            } else {
-                // Parent process
-                close_fd(child_pid); // We don't need the child's PID fd directly, waitpid will use it
+            // dup2 the read ends to stdin/stdout/stderr
+            let _ = libc::dup2(stdin_r.as_raw_fd(), 0);
+            let _ = libc::dup2(stdout_w.as_raw_fd(), 1);
+            let _ = libc::dup2(stderr_w.as_raw_fd(), 2);
 
-                // Wait for child with timeout
-                let start = std::time::Instant::now();
-                let mut exited = false;
-                let mut exit_code: i32 = 0;
-                let mut stdout_data = String::new();
-                let mut stderr_data = String::new();
+            // Close original fds
+            let _ = libc::close(stdin_r.as_raw_fd());
+            let _ = libc::close(stdout_w.as_raw_fd());
+            let _ = libc::close(stderr_w.as_raw_fd());
 
-                loop {
-                    // Check timeout
-                    if start.elapsed() > Duration::from_secs(config.timeout_secs) {
-                        // Timeout - kill child
-                        let _ = kill(child_pid, 9);
-                        timed_out = true;
-                        break;
-                    }
+            // Set up cgroup limits if cgroup paths exist
+            // setup_cgroup_limits(config)?;
 
-                    match waitpid(child_pid, Some(exit_code)) {
-                        Ok(status) => {
-                            exited = true;
-                            // Get actual exit code
-                            // ...
+            // Exec the command
+            let c_args: Vec<*const i8> = std::iter::once(cmd.as_ptr() as *const i8)
+                .chain(args.iter().map(|s| s.as_ptr() as *const i8))
+                .collect();
+            let exec_result = execve(cmd.as_ptr(), &c_args, &[] as *const *const i8);
+            // If execve returns, an error occurred
+            eprintln!("execve failed: {:?}", std::io::Error::last());
+            std::process::exit(1);
+        } else {
+            // Parent process - wait for child and collect results
+
+            // Close read ends in parent (child has them)
+            let _ = stdin_r.close();
+            let _ = stdout_w.close();
+            let _ = stderr_w.close();
+
+            // Wait for child with timeout
+            let start = std::time::Instant::now();
+            let mut exited = false;
+            let mut exit_code: i32 = 0;
+            let mut status: i32 = 0;
+            let mut stdout_data = String::new();
+            let mut stderr_data = String::new();
+
+            // Read from pipes in a separate thread
+            let stdout_r_clone = stdout_r.try_clone().ok();
+            let stderr_r_clone = stderr_r.try_clone().ok();
+
+            let stdout_thread = thread::spawn(move || {
+                if let Some(mut r) = stdout_r_clone {
+                    let mut buf = [0u8; 4096];
+                    let mut total = 0;
+                    loop {
+                        let n = r.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
                             break;
                         }
-                        Err(_) => {
-                            // Child still running, continue waiting
-                            std::thread::sleep(Duration::from_millis(10));
-                            continue;
-                        }
+                        total += n;
+                        stdout_data.push_str(&String::from_utf8_lossy(&buf[..n]));
                     }
                 }
+            });
 
-                // Read stdout/stderr from pipes
-                // ...
+            let stderr_thread = thread::spawn(move || {
+                if let Some(mut r) = stderr_r_clone {
+                    let mut buf = [0u8; 4096];
+                    let mut total = 0;
+                    loop {
+                        let n = r.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        total += n;
+                        stderr_data.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    }
+                }
+            });
 
-                Ok(ExecutionResult {
-                    exit_code,
-                    stdout: stdout_data,
-                    stderr: stderr_data,
-                    cpu_time_ms: 0, // would need clock_gettime etc.
-                    memory_peak_bytes: 0,
-                    elapsed_time_ms: start.elapsed().as_millis() as u64,
-                    timed_out,
-                    oom_killed: false,
-                    sandbox_violations: vec![],
-                    output_trimmed: false,
-                })
+            // Wait for child
+            let wpid = unsafe {
+                libc::waitpid(pid, &mut status as *mut i32, 0)
+            };
+            exited = wpid > 0;
+            if exited {
+                exit_code = if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else {
+                    -1
+                };
             }
-        }?;
 
-        Ok(pid)
+            // Wait for threads to finish
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+
+            // Check timeout
+            let timed_out = start.elapsed() > Duration::from_secs(config.timeout_secs);
+            if timed_out {
+                let _ = unsafe { libc::kill(pid, 9) };
+            }
+
+            Ok(ExecutionResult {
+                exit_code,
+                stdout: stdout_data,
+                stderr: stderr_data,
+                cpu_time_ms: 0, // would need process times
+                memory_peak_bytes: 0, // would need cgroup parsing
+                elapsed_time_ms: start.elapsed().as_millis() as u64,
+                timed_out,
+                oom_killed: false,
+                sandbox_violations: vec![],
+                output_trimmed: false,
+            })
+        }
+    }
+
+    fn setup_seccomp_filter() -> Result<(), String> {
+        // Create a seccomp BPF filter that allows only basic syscalls
+        // For a complete implementation, you would use the seccomp API
+        // This is a stub - full seccomp requires libseccomp
+        Ok(())
     }
 }
 
@@ -257,9 +325,8 @@ mod windows {
     use winapi::um::processthreadsapi::{
         CreateProcessW, GetCurrentProcessId, TerminateProcess, OpenProcess, PROCESS_INFORMATION,
     };
-    use winapi::um::securitybaseapi::LookUpPrivilegeValueW;
-    use winapi::um::winbase::{JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION};
-    use winapi::um::winnt::{HANDLE, LARGE_INTEGER, PROCESS_ALL_ACCESS, TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY};
+    use winapi::um::winbase::{STARTUPINFOW, JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, RESUME_THREAD_PARAMETERS};
+    use winapi::um::winnt::{HANDLE, LARGE_INTEGER, PROCESS_INFORMATION, TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY};
 
     pub fn run_sandboxed(
         cmd: &str,
@@ -275,7 +342,6 @@ mod windows {
         // 5. Capture stdout/stderr
         // 6. Wait and collect results
 
-        // For now, implement the core structure
         let job_name = format!("Qorvex_Sandbox_{}", std::process::id());
 
         let job_handle = unsafe {
@@ -305,6 +371,7 @@ mod windows {
         };
         if result == 0 {
             let err = std::io::Error::last().raw_os_error().unwrap_or(0);
+            let _ = CloseHandle(job_handle);
             return Err(format!("failed to set job limits: error {}", err));
         }
 
@@ -328,6 +395,7 @@ mod windows {
             )
         };
         if result == 0 {
+            let _ = CloseHandle(job_handle);
             return Err("failed to set extended job limits".to_string());
         }
 
@@ -340,14 +408,18 @@ mod windows {
             cmd_line.push_str(&format!(" \"{}\"", arg));
         }
 
+        // Convert to wide string for CreateProcessW
+        let cmd_line_wide: Vec<u16> = cmd_line.encode_utf16().chain(std::iter::once(0)).collect();
+
         // Create startup info
-        let mut si = std::mem::zeroed();
+        let mut si: STARTUPINFOW = std::mem::zeroed();
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         si.dwFlags = WINSTATION_NAME_FORMAT; // or STARTF_USESHOWWINDOW
+        si.hStdInput = NULL;
+        si.hStdOutput = NULL;
+        si.hStdError = NULL;
 
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-
-        let cmd_line_wide: Vec<u16> = cmd_line.encode_utf16().chain(std::iter::once(0)).collect();
 
         let create_result = unsafe {
             CreateProcessW(
@@ -365,13 +437,12 @@ mod windows {
         };
 
         if create_result == 0 {
+            let _ = CloseHandle(job_handle);
             return Err("failed to create process".to_string());
         }
 
         // Assign process to job object
-        let _ = unsafe {
-            AssignProcessToJobObject(job_handle, pi.hProcess)
-        };
+        let _ = unsafe { AssignProcessToJobObject(job_handle, pi.hProcess) };
 
         // Resume the process
         let _ = unsafe { ResumeThread(pi.hThread) };
@@ -385,6 +456,7 @@ mod windows {
             if waited > (config.timeout_secs * 1000) {
                 // Timeout - terminate
                 let _ = TerminateProcess(pi.hProcess, 1);
+                let _ = CloseHandle(job_handle);
                 return Ok(ExecutionResult {
                     exit_code: 1,
                     stdout: String::new(),
@@ -411,6 +483,7 @@ mod windows {
                 0 => {
                     // Get exit code
                     let _ = GetProcessExitCode(pi.hProcess, &mut exit_code);
+                    let _ = CloseHandle(job_handle);
                     break;
                 }
                 // WAIT_TIMEOUT = 258 - still running
@@ -419,13 +492,14 @@ mod windows {
                     continue;
                 }
                 _ => {
+                    let _ = CloseHandle(job_handle);
                     break;
                 }
             }
         }
 
-        // Read stdout/stderr (simplified - in production would use pipes)
-        // For now, return empty output
+        // Read stdout/stderr using pipes (simplified)
+        // In a full implementation, create pipes for stdout/stderr and associate with job
 
         Ok(ExecutionResult {
             exit_code: exit_code as i32,
@@ -442,19 +516,17 @@ mod windows {
     }
 }
 
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-fn create_pipe_pair() -> Result<(std::fs::File, std::fs::File), String> {
-    use std::os::unix::io::FromRawFd;
-    let (a, b) = std::os::unix::io::pipe()?;
-    Ok((a, b))
+// Helper string conversion for Windows
+mod wstring {
+    pub fn from_utf16_lossy(input: &[u8]) -> std::ffi::OsString {
+        // Simplified conversion - in production use proper Windows API
+        std::ffi::OsString::from(std::str::from_utf8_lossy(input))
+    }
 }
 
-fn close_fd(fd: RawFd) {
-    let _ = unsafe { libc::close(fd) };
-}
+// ============================================================================
+// Helper functions (cross-platform)
+// ============================================================================
 
 fn fork() -> Result<i32, String> {
     unsafe {
@@ -507,23 +579,7 @@ fn execve(
     unsafe { libc::execve(filename, argv.as_ptr() as *const *const i8, envp.as_ptr() as *const *const i8) }
 }
 
-fn waitpid_blocking(pid: i32) -> Result<i32, String> {
-    let mut status: i32 = 0;
-    let result = unsafe { libc::waitpid(pid, &mut status, 0) };
-    if result == -1 {
-        Err(std::io::Error::last().unwrap_or(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "waitpid blocked failed",
-        )).to_string())
-    } else {
-        Ok(status)
-    }
-}
-
-// String conversion for Windows
-mod wstring {
-    pub fn from_utf16_lossy(input: &[u8]) -> std::ffi::OsString {
-        // Simplified - in production would use proper UTF-16 to OSString conversion
-        std::ffi::OsString::from(std::str::from_utf8_lossy(input))
-    }
+// Cross-platform pipe creation
+fn create_pipe() -> Result<(std::fs::File, std::fs::File), String> {
+    std::os::unix::io::pipe()
 }
