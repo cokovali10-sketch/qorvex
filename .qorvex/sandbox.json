@@ -1,0 +1,23 @@
+{
+  "sandbox": {
+    "cpu_limit_ms": 30000,
+    "memory_limit_bytes": 536870912,
+    "disk_limit_bytes": 104857600,
+    "process_limit": 16,
+    "timeout_secs": 60,
+    "network_blocked": true,
+    "readonly_root": true,
+    "work_dir": "/workspace",
+    "env_whitelist": ["PATH", "HOME", "QORVEX_PROJECT"],
+    "rlimits": {
+      "NOFILE": [128, 128],
+      "NPROC": [16, 16],
+      "FSIZE": [10485760, 10485760]
+    }
+  },
+  "execution": {
+    "command": "npm",
+    "args": ["run", "build"],
+    "input_file": ".qorvex/sandbox_input.txt"
+  }
+}
