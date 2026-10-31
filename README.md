@@ -170,3 +170,35 @@ MIT — see [LICENSE](LICENSE) / см. [LICENSE](LICENSE).
 Repo / Репозиторий: `https://github.com/cokovali10-sketch/qorvex`
 Commit / Коммит: `ca84eae` (v0.3.0)
 Status / Статус: All priorities done / Все приоритеты выполнены
+## Problem
+
+Security scanning pipelines are fragmented across SAST, DAST, SBOM, and reporting tools. Qorvex orchestrates them into a single pipeline with policy enforcement and audit trails.
+
+## Architecture
+
+- **pkg/api**: HTTP API.
+- **pkg/audit**: immutable audit log.
+- **pkg/forge**: code quality checks.
+- **pkg/orchestrator**: pipeline orchestration.
+- **pkg/policy**: declarative security rules.
+- **pkg/report**: SARIF/JSON/HTML export.
+- **pkg/sandbox**: isolated execution (Rust FFI on Linux, stub elsewhere).
+- **pkg/sbom**: CycloneDX SBOM generation.
+- **pkg/store**: persistence.
+- **rust**: sandbox executor (Linux-only).
+
+## Trade-offs
+
+- Sandbox is Linux-only; Windows/macOS return "not available".
+- Rust executor requires cgo and a prebuilt lib.
+- Policy engine is declarative; complex logic needs code changes.
+
+## Benchmarks
+
+Go tests with `-race`. See CI.
+
+## Limitations
+
+- Sandbox does not run on Windows/macOS.
+- No multi-tenant isolation yet.
+- Report export formats limited to SARIF/JSON/HTML.
