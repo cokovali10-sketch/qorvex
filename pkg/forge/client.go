@@ -100,7 +100,7 @@ func ScanForge(projectPath string) (*Finding, error) {
 
 	findings := make([]Finding, 0, len(result.Findings))
 	for _, f := range result.Findings {
-		sev := severityFor(f.Severity)
+		sev := SeverityFor(f.Severity)
 		findings = append(findings, Finding{
 			Severity:    sev,
 			Category:    f.Category,
@@ -112,7 +112,7 @@ func ScanForge(projectPath string) (*Finding, error) {
 	}
 
 	return &Finding{
-		Severity:    severityFor(result.Verdict),
+		Severity:    SeverityFor(result.Verdict),
 		Category:    "security",
 		Description: fmt.Sprintf("Forge verdict: %s (%d findings)", result.Verdict, len(findings)),
 		FilePath:     "",
@@ -143,7 +143,7 @@ func (c *ForgeClient) Ping() bool {
 func (c *ForgeClient) Audit(root string) (*ForgeScanResult, error) {
 	return nil, fmt.Errorf("forge audit not implemented in adapter")
 }
-func severityFor(s string) string {
+func SeverityFor(s string) string {
 	switch strings.ToLower(s) {
 	case "critical":
 		return "critical"

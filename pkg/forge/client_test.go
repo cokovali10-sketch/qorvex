@@ -114,6 +114,21 @@ func TestForgeScanResultWithFindings(t *testing.T) {
 	}
 }
 
+func TestSeverityFor(t *testing.T) {
+	cases := map[string]string{
+		"critical": "critical",
+		"high":     "critical",
+		"medium":   "medium",
+		"low":      "low",
+		"foo":      "info",
+	}
+	for in, want := range cases {
+		if got := SeverityFor(in); got != want {
+			t.Errorf("SeverityFor(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestForgeClientPing(t *testing.T) {
 	c := NewForgeClient("/invalid/path")
 	alive := c.Ping()
