@@ -149,28 +149,28 @@ mod linux {
         223, // rt_sigprocmask
         224, // rt_sigpending
         225, // rt_sigtimedwait
-        226, # sigwaitinfo
-        231, # clone
-        232, # fork
-        233, # vfork
-        234, # _exit
+        226, // sigwaitinfo
+        231, // clone
+        232, // fork
+        233, // vfork
+        234, // _exit
         // Memory management
-        38, # brk
-        39, # brk (alternate)
-        215, # mmap
-        216, # mprotect
-        217, # munmap
+        38, // brk
+        39, // brk (alternate)
+        215, // mmap
+        216, // mprotect
+        217, // munmap
         // Time
-        220, # nanosleep
+        220, // nanosleep
         // Getpid/getppid
-        20, # getpid
-        41, # getppid
+        20, // getpid
+        41, // getppid
         // Basic futex
-        240, # futex
+        240, // futex
         // Getcwd
-        79, # getcwd
+        79, // getcwd
         // Kill pgid
-        61, # killpg
+        61, // killpg
     ];
 
     pub fn run_sandboxed(
