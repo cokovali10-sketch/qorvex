@@ -207,7 +207,7 @@ func (p *Pipeline) RunAsync(run *platform.CheckRun, s *store.Store, auditors ...
 			})
 		}
 		if bom, err := sbom.NewGenerator(run.ProjectID, run.Result.Summary).Generate(components); err == nil {
-			if xml, err := bom.MarshalXML(); err == nil {
+			if xml, err := bom.ToXML(); err == nil {
 				_ = s.CreateFinding(&platform.Finding{
 					ProjectID:   run.ProjectID,
 					CheckRunID:  run.ID,

@@ -29,7 +29,7 @@ func TestGenerateBom(t *testing.T) {
 		t.Fatal("license not carried over")
 	}
 
-	xmlOut, err := bom.MarshalXML()
+	xmlOut, err := bom.ToXML()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -121,10 +121,6 @@ func (g *Generator) Generate(components []Component) (*Bom, error) {
 	return bom, nil
 }
 
-// MarshalXML writes the BOM as CycloneDX XML.
-func (b *Bom) MarshalXML() ([]byte, error) {
-	return xml.MarshalIndent(b, "", "  ")
-}
 
 // String returns a compact text summary of the BOM.
 func (b *Bom) String() string {
@@ -134,4 +130,8 @@ func (b *Bom) String() string {
 		sb.WriteString(fmt.Sprintf("  - %s %s (%s)\n", c.Name, c.Version, c.PURL))
 	}
 	return sb.String()
+}
+// ToXML writes the BOM as CycloneDX XML.
+func (b *Bom) ToXML() ([]byte, error) {
+	return xml.MarshalIndent(b, "", "  ")
 }
